@@ -14,6 +14,7 @@ All notable changes are recorded here. / 所有重要变更记录于此。
 - Added an interactive 20-row list pager with arrow navigation and an alternate screen
   that leaves terminal scrollback untouched.
 - Added backward-compatible SQLite migration and new auto-memory diagnostics.
+- Fixed Python 3.10 configuration loading with a conditional `tomli` dependency.
 - Added bilingual documentation, SVG branding, CI, issue template, package metadata,
   security and contribution policies.
 
@@ -26,6 +27,7 @@ All notable changes are recorded here. / 所有重要变更记录于此。
 - 保留数字显存估计及有界 `--retry-on-oom --max-retries` 的兼容行为。
 - 新增默认每页 20 条的交互列表、方向键翻页和不污染终端历史的备用屏幕。
 - 新增向后兼容的 SQLite 迁移及 auto 显存诊断字段。
+- 通过条件依赖 `tomli` 修复 Python 3.10 配置读取。
 - 补齐双语文档、SVG 品牌标志、CI、issue 模板、包元数据、安全与贡献政策。
 
 ## [0.1.0] - 2026-07-20

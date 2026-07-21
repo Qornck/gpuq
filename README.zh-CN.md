@@ -74,8 +74,8 @@
 - NVIDIA 驱动和可用的 `nvidia-smi`
 - CUDA 子任务应把调度器选中的可见卡写作 `cuda:0`
 
-独立二进制不需要 Python；源码安装需要 Python 3.10+。调度器本身没有第三方
-Python 运行时依赖。
+独立二进制不需要 Python；源码安装需要 Python 3.10+。Python 3.11+ 只使用标准库；
+Python 3.10 会安装用于读取配置的轻量兼容依赖 `tomli`。
 
 ## 安装
 

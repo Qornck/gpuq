@@ -8,8 +8,8 @@ from typing import Any
 
 try:
     import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python >=3.11 normally
-    tomllib = None  # type: ignore[assignment]
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10 CI
+    import tomli as tomllib
 
 
 @dataclass(frozen=True)
@@ -71,8 +71,6 @@ def load_settings(
     path = Path(config_path).expanduser().resolve() if config_path else default_config_path()
     data: dict[str, Any] = {}
     if path.exists():
-        if tomllib is None:
-            raise RuntimeError("TOML config needs Python 3.11 or the tomli package")
         with path.open("rb") as handle:
             loaded = tomllib.load(handle)
         data = dict(loaded.get("gpuq", loaded))

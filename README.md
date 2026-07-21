@@ -80,7 +80,8 @@ and OOM learning; it cannot provide Slurm's hard guarantees.
 - A CUDA workload that addresses the selected visible card as `cuda:0`
 
 The standalone binary does not require Python. A source installation requires Python
-3.10+. The scheduler itself has no third-party runtime Python dependencies.
+3.10+. Python 3.11+ uses the standard library only; Python 3.10 installs the small
+`tomli` compatibility dependency for configuration parsing.
 
 ## Install
 
