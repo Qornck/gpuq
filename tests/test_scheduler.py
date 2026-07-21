@@ -67,6 +67,19 @@ def test_best_fit_and_allowlist(settings: Settings, db: QueueDB, tmp_path: Path)
     assert decision.gpu_index == 2
 
 
+def test_lowest_utilization_precedes_best_fit(
+    settings: Settings, db: QueueDB, tmp_path: Path
+) -> None:
+    submit_job(db, tmp_path, stable_samples=1)
+    backend = FakeBackend(
+        [gpu(0, free=6000, util=80), gpu(1, free=9000, util=15)]
+    )
+    scheduler = Scheduler(settings=settings, db=db, backend=backend)
+    decision = scheduler.tick(dry_run=True)
+    assert decision is not None
+    assert decision.gpu_index == 1
+
+
 def test_exclusive_requires_no_compute_process(settings: Settings, db: QueueDB, tmp_path: Path) -> None:
     submit_job(db, tmp_path, stable_samples=1, exclusive=True, memory_mb=100)
     busy = gpu(0, free=23000, used=500, util=0, processes=(GPUProcess(7, 100),))

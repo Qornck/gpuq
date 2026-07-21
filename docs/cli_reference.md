@@ -39,7 +39,7 @@ gpuq submit [OPTIONS] -- COMMAND [ARGUMENTS...]
 | `--memory-mb N` / `--memory N` | 是 | 任务预计峰值 GPU 显存，MB；不含安全余量 |
 | `--reserve-mb N` / `--reserve N` | 否 | 额外留给竞态、驱动波动和估计误差的显存；默认 1024MB |
 | `--gpu LIST` | 否 | 允许使用的物理 GPU，如 `--gpu 1`、`--gpu 0,1`；可重复；省略表示任意卡 |
-| `--max-utilization N` | 否 | 启动时 GPU 利用率上限 0–100；省略则只按显存调度 |
+| `--max-utilization N` | 否 | 启动时 GPU 利用率硬上限 0–100；省略则不设硬上限，候选卡仍优先选择低利用率 |
 | `--stable-samples N` | 否 | 资源条件必须连续满足的采样次数；默认 3 |
 | `--exclusive` | 否 | 要求无 compute 进程、显存和利用率接近空闲 |
 

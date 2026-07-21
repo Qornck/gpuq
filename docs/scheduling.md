@@ -20,7 +20,10 @@ free_memory(g) >= required(j)
 utilization(g) <= max_utilization(j)
 ```
 
-条件连续满足 `stable_samples(j)` 次后才成为候选，启动前重新读取一次 GPU 状态。默认三个 10 秒采样，相当于约 30 秒稳定窗口。
+条件连续满足 `stable_samples(j)` 次后才成为候选，启动前重新读取一次 GPU 状态。
+默认每 10 秒采样、连续 3 个样本：三个样本本身横跨约 20 秒；若条件刚好在一次
+采样后满足，则从满足条件到启动约需 20–30 秒。第三个样本后还会立即进行一次
+权威复查，但该复查不额外等待一个采样周期。
 
 ## 2. 独占任务
 
@@ -32,7 +35,7 @@ utilization(g) <= max_utilization(j)
 
 少量驱动、桌面或监控显存不等于存在 CUDA 训练，因此不要求绝对 0MB。
 
-## 3. 优先级与 best-fit
+## 3. 优先级、最低负载与 best-fit
 
 任务首先按：
 
@@ -49,10 +52,15 @@ priority DESC, job_id ASC
 同一任务可在多张卡运行时，选择：
 
 ```text
-argmin(free_memory - required_memory, utilization, gpu_index)
+argmin(utilization, free_memory - required_memory, gpu_index)
 ```
 
-即优先使用“刚好放得下”的 GPU。
+显存首先作为硬门槛；所有满足显存、安全余量、allowlist 和可选利用率上限的 GPU
+中，优先选择当前 `GPU-Util` 最低的设备。利用率相同时，再使用“刚好放得下”
+的 best-fit GPU，最后用物理编号保证结果确定。
+
+`GPU-Util` 是 `nvidia-smi` 给出的瞬时设备利用率，不等价于长期平均负载；连续
+稳定采样主要用于确认资源条件持续成立，最终排序使用最近一次采样值。
 
 ## 4. 为什么不能真正等价于 Slurm
 

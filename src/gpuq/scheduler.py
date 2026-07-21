@@ -74,7 +74,11 @@ class Scheduler:
                     self.stability[key] = 0
             if not eligible:
                 continue
-            _, _, selected = min(eligible, key=lambda row: (row[0], row[1], row[2].index))
+            # Memory is a hard feasibility gate.  Among GPUs that can safely
+            # fit the job, prefer the least-loaded device; use best-fit only
+            # as a tie-breaker so we do not place new work on an already busy
+            # card merely because it has slightly less free memory.
+            _, _, selected = min(eligible, key=lambda row: (row[1], row[0], row[2].index))
             stable = self.stability[(job.id, selected.index)]
             if stable >= job.stable_samples:
                 decisions.append(

@@ -318,7 +318,11 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--memory-mb", "--memory", type=int, required=True, help="预计峰值 GPU 显存，单位 MB")
     submit.add_argument("--reserve-mb", "--reserve", type=int, help="额外安全余量；默认读取配置")
     submit.add_argument("--gpu", action="append", help="允许的物理 GPU，例如 --gpu 0,1；可重复")
-    submit.add_argument("--max-utilization", type=int, help="启动时允许的最大 GPU 利用率 0–100；省略则只看显存")
+    submit.add_argument(
+        "--max-utilization",
+        type=int,
+        help="启动时允许的最大 GPU 利用率 0–100；省略则不设硬上限，选卡仍优先低利用率",
+    )
     submit.add_argument("--stable-samples", type=int, help="必须连续满足条件的采样次数")
     submit.add_argument("--priority", type=int, default=0, help="优先级；数值越大越先调度")
     submit.add_argument("--exclusive", action="store_true", help="要求 GPU 无 compute 进程且接近空闲")
