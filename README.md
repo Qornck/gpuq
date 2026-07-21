@@ -16,6 +16,8 @@
 
 调度 daemon 每个采样周期最多启动一个任务。这样二次显存检查始终针对最新状态；
 若同一张卡还能放下更多任务，后续采样周期会继续启动。
+同一队列已经启动但尚未实际分配的显存会按请求值保留，避免多个慢启动任务在
+CUDA 分配发生前被连续放到同一张卡。
 
 ## 安装
 
@@ -140,6 +142,9 @@ systemctl --user status gpuqd.service
 ```
 
 服务默认假定 `gpuq` 安装在 `~/.local/bin/gpuq`。如果使用虚拟环境，需要修改 `ExecStart` 为实际绝对路径。
+仓库 unit 使用 `KillMode=process`：重启 scheduler daemon 不会连带杀死独立
+runner 和训练进程。新 daemon 会保留仍存活的任务；若数据库中的 active PID
+全部消失，则将该记录标为 `failed/orphaned`，避免永久伪装成 `running`。
 
 ## 数据位置
 

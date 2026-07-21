@@ -343,6 +343,36 @@ class QueueDB:
                 (status, exit_code, error, failure_kind, utcnow(), utcnow(), job_id),
             )
 
+    def fail_if_active(
+        self,
+        job_id: int,
+        *,
+        error: str,
+        failure_kind: str,
+    ) -> bool:
+        """Atomically fail a stale active record without overwriting a late runner result."""
+        now = utcnow()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs SET status=?, exit_code=NULL, error=?, failure_kind=?,
+                    finished_at=?, updated_at=?, assigned_gpu=NULL, pid=NULL,
+                    pgid=NULL, worker_pid=NULL
+                WHERE id=? AND status IN (?, ?)
+                """,
+                (
+                    JobStatus.FAILED.value,
+                    error,
+                    failure_kind,
+                    now,
+                    now,
+                    job_id,
+                    JobStatus.STARTING.value,
+                    JobStatus.RUNNING.value,
+                ),
+            )
+        return cursor.rowcount == 1
+
     def requeue_after_oom(self, job_id: int, *, new_memory_mb: int, error: str) -> None:
         with self.connect() as connection:
             connection.execute(

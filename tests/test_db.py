@@ -49,3 +49,27 @@ def test_dependency_success_and_failure(db: QueueDB, tmp_path: Path) -> None:
 def test_invalid_dependency_is_rejected(db: QueueDB, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="does not exist"):
         submit_job(db, tmp_path, dependency_id=999)
+
+
+def test_fail_if_active_does_not_overwrite_terminal_result(
+    db: QueueDB, tmp_path: Path
+) -> None:
+    job = submit_job(db, tmp_path)
+    assert db.claim(job.id, 0)
+    db.mark_running(job.id, pid=101, pgid=101)
+    assert db.fail_if_active(
+        job.id, error="runner disappeared", failure_kind="orphaned"
+    )
+    failed = db.get(job.id)
+    assert failed.status == JobStatus.FAILED.value
+    assert failed.failure_kind == "orphaned"
+    assert failed.pid is None
+
+    retried = db.retry(job.id)
+    assert db.claim(retried.id, 0)
+    db.mark_running(retried.id, pid=102, pgid=102)
+    db.finish(retried.id, status=JobStatus.COMPLETED.value, exit_code=0)
+    assert not db.fail_if_active(
+        retried.id, error="late stale check", failure_kind="orphaned"
+    )
+    assert db.get(retried.id).status == JobStatus.COMPLETED.value

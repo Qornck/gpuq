@@ -5,6 +5,10 @@ After=default.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/gpuq daemon
+# Keep independently managed runners and training workers alive when only the
+# scheduler daemon is restarted.  The replacement daemon reconciles their
+# SQLite records and they continue to write their own terminal status.
+KillMode=process
 Restart=on-failure
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1

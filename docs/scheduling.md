@@ -14,6 +14,16 @@ required(j) = estimated_peak_memory(j) + reserve(j)
 free_memory(g) >= required(j)
 ```
 
+对本队列中已经启动、但 CUDA 尚未完全兑现显存请求的任务，还要扣除未兑现预留：
+
+```text
+outstanding(j) = max(0, estimated_peak(j) - observed_process_memory(j))
+schedulable_free(g) = physical_free(g) - sum(outstanding(j))
+```
+
+并保留同卡 active jobs 与候选任务中最大的安全余量。这避免慢启动任务尚未出现在
+`nvidia-smi` 时，daemon 误以为相同显存仍可重复分配。
+
 若任务设置最大利用率，还要求：
 
 ```text
@@ -87,6 +97,11 @@ argmin(utilization, free_memory - required_memory, gpu_index)
 - `cancel` 只向该任务进程组发送信号；
 - daemon 或终端重启不会删除队列和日志；
 - runner 独立写回结果，因此 daemon 短暂重启时运行任务仍可结束并落库。
+
+systemd unit 使用 `KillMode=process`，所以仅重启 daemon 不会杀死 runner/worker。
+新 daemon 每轮检查 active 记录：runner 或 worker 任一仍存在就保留；二者都消失
+且没有写入终态时，原子标记为 `failed`、`failure_kind=orphaned`。该条件更新
+不会覆盖恰好同时由 runner 写入的正常完成状态。
 
 ## 6. OOM 重试
 
