@@ -3,4 +3,4 @@
 from .models import GPUState, Job, JobStatus
 
 __all__ = ["GPUState", "Job", "JobStatus"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

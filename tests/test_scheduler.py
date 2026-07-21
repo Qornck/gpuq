@@ -6,7 +6,7 @@ from pathlib import Path
 from gpuq.config import Settings
 from gpuq.db import QueueDB
 from gpuq.models import GPUProcess, GPUState
-from gpuq.scheduler import Scheduler
+from gpuq.scheduler import Scheduler, runner_command
 
 from conftest import submit_job
 
@@ -97,8 +97,15 @@ def mark_running(
     gpu_index: int,
     runner_pid: int,
     worker_pid: int,
+    launch_free_memory_mb: int | None = None,
+    launch_total_memory_mb: int | None = None,
 ) -> None:
-    assert db.claim(job_id, gpu_index)
+    assert db.claim(
+        job_id,
+        gpu_index,
+        launch_free_memory_mb=launch_free_memory_mb,
+        launch_total_memory_mb=launch_total_memory_mb,
+    )
     db.mark_running(job_id, pid=runner_pid, pgid=runner_pid)
     db.set_worker_pid(job_id, worker_pid)
 
@@ -204,6 +211,145 @@ def test_only_unmaterialized_part_of_reservation_is_subtracted(
     assert decision.outstanding_reservation_mb == 1000
 
 
+def test_auto_probe_starts_with_only_reserve_plus_sentinel(
+    settings: Settings, db: QueueDB, tmp_path: Path
+) -> None:
+    job = submit_job(
+        db,
+        tmp_path,
+        memory_mb=1,
+        memory_mode="auto",
+        reserve_mb=1000,
+        stable_samples=1,
+    )
+    scheduler = Scheduler(
+        settings=settings,
+        db=db,
+        backend=FakeBackend([gpu(0, free=1001, used=1000)]),
+    )
+    decision = scheduler.tick(dry_run=True)
+    assert decision is not None
+    assert decision.job_id == job.id
+    assert decision.required_memory_mb == 1001
+
+
+def test_uncalibrated_auto_probe_reserves_launch_free_region(
+    settings: Settings, db: QueueDB, tmp_path: Path
+) -> None:
+    probe = submit_job(
+        db,
+        tmp_path,
+        name="auto-probe",
+        memory_mb=1,
+        memory_mode="auto",
+        reserve_mb=1000,
+        stable_samples=1,
+    )
+    mark_running(
+        db,
+        probe.id,
+        gpu_index=0,
+        runner_pid=101,
+        worker_pid=102,
+        launch_free_memory_mb=10000,
+        launch_total_memory_mb=11000,
+    )
+    submit_job(
+        db,
+        tmp_path,
+        name="candidate",
+        memory_mb=4000,
+        reserve_mb=1000,
+        stable_samples=1,
+    )
+    state = gpu(
+        0,
+        free=9000,
+        used=2000,
+        processes=(GPUProcess(102, 1000),),
+    )
+    scheduler = Scheduler(
+        settings=settings,
+        db=db,
+        backend=FakeBackend([state]),
+        process_checker=lambda _pid: True,
+    )
+    assert scheduler.tick(dry_run=True) is None
+
+
+def test_auto_oom_requirement_over_single_gpu_limit_fails_terminally(
+    settings: Settings, db: QueueDB, tmp_path: Path
+) -> None:
+    job = submit_job(
+        db,
+        tmp_path,
+        memory_mb=1,
+        memory_mode="auto",
+        reserve_mb=1000,
+        stable_samples=1,
+    )
+    db.requeue_after_oom(job.id, new_memory_mb=24001, error="oom")
+    scheduler = Scheduler(
+        settings=settings,
+        db=db,
+        backend=FakeBackend([gpu(0, free=23000, used=1000)]),
+    )
+    assert scheduler.tick(dry_run=True) is None
+    failed = db.get(job.id)
+    assert failed.status == "failed"
+    assert failed.failure_kind == "oom_exceeds_device"
+    assert "25001MB" in (failed.error or "")
+
+
+def test_auto_oom_requirement_uses_largest_allowed_single_gpu(
+    settings: Settings, db: QueueDB, tmp_path: Path
+) -> None:
+    job = submit_job(
+        db,
+        tmp_path,
+        memory_mb=1,
+        memory_mode="auto",
+        reserve_mb=1000,
+        stable_samples=1,
+        gpu_allowlist=[0, 1],
+    )
+    db.requeue_after_oom(job.id, new_memory_mb=20000, error="oom")
+    scheduler = Scheduler(
+        settings=settings,
+        db=db,
+        backend=FakeBackend(
+            [gpu(0, free=15000, used=1000), gpu(1, free=23000, used=1000)]
+        ),
+    )
+    decision = scheduler.tick(dry_run=True)
+    assert decision is not None
+    assert decision.gpu_index == 1
+    assert db.get(job.id).status == "retry_wait"
+
+
 def test_systemd_restart_preserves_job_processes() -> None:
     unit = Path(__file__).resolve().parents[1] / "systemd" / "gpuqd.service"
     assert "KillMode=process" in unit.read_text(encoding="utf-8")
+
+
+def test_standalone_binary_uses_internal_runner_entrypoint(tmp_path: Path) -> None:
+    command = runner_command(str(tmp_path), 42, frozen=True)
+    assert command[1:] == [
+        "--gpuq-internal-runner",
+        "--state-dir",
+        str(tmp_path),
+        "--job-id",
+        "42",
+    ]
+
+
+def test_python_install_uses_module_runner_entrypoint(tmp_path: Path) -> None:
+    command = runner_command(str(tmp_path), 42, frozen=False)
+    assert command[1:] == [
+        "-m",
+        "gpuq.runner",
+        "--state-dir",
+        str(tmp_path),
+        "--job-id",
+        "42",
+    ]

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     env_json TEXT NOT NULL DEFAULT '{}',
     gpu_allowlist_json TEXT,
     memory_mb INTEGER NOT NULL CHECK(memory_mb > 0),
+    memory_mode TEXT NOT NULL DEFAULT 'fixed' CHECK(memory_mode IN ('fixed', 'auto')),
     reserve_mb INTEGER NOT NULL CHECK(reserve_mb >= 0),
     max_utilization INTEGER,
     stable_samples INTEGER NOT NULL CHECK(stable_samples > 0),
@@ -39,6 +40,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     error TEXT,
     failure_kind TEXT,
     peak_memory_mb INTEGER NOT NULL DEFAULT 0,
+    oom_count INTEGER NOT NULL DEFAULT 0,
+    launch_free_memory_mb INTEGER,
+    launch_total_memory_mb INTEGER,
+    last_oom_requested_mb INTEGER,
     notify INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -72,6 +77,22 @@ class QueueDB:
     def initialize(self) -> None:
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            migrations = {
+                "memory_mode": "TEXT NOT NULL DEFAULT 'fixed'",
+                "oom_count": "INTEGER NOT NULL DEFAULT 0",
+                "launch_free_memory_mb": "INTEGER",
+                "launch_total_memory_mb": "INTEGER",
+                "last_oom_requested_mb": "INTEGER",
+            }
+            for name, definition in migrations.items():
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE jobs ADD COLUMN {name} {definition}"
+                    )
 
     @contextmanager
     def transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
@@ -97,6 +118,7 @@ class QueueDB:
             env=dict(json.loads(row["env_json"])),
             gpu_allowlist=tuple(int(value) for value in allowlist) if allowlist else None,
             memory_mb=int(row["memory_mb"]),
+            memory_mode=str(row["memory_mode"]),
             reserve_mb=int(row["reserve_mb"]),
             max_utilization=(int(row["max_utilization"]) if row["max_utilization"] is not None else None),
             stable_samples=int(row["stable_samples"]),
@@ -117,6 +139,22 @@ class QueueDB:
             error=(str(row["error"]) if row["error"] is not None else None),
             failure_kind=(str(row["failure_kind"]) if row["failure_kind"] is not None else None),
             peak_memory_mb=int(row["peak_memory_mb"]),
+            oom_count=int(row["oom_count"]),
+            launch_free_memory_mb=(
+                int(row["launch_free_memory_mb"])
+                if row["launch_free_memory_mb"] is not None
+                else None
+            ),
+            launch_total_memory_mb=(
+                int(row["launch_total_memory_mb"])
+                if row["launch_total_memory_mb"] is not None
+                else None
+            ),
+            last_oom_requested_mb=(
+                int(row["last_oom_requested_mb"])
+                if row["last_oom_requested_mb"] is not None
+                else None
+            ),
             notify=bool(row["notify"]),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
@@ -143,11 +181,14 @@ class QueueDB:
         retry_on_oom: bool,
         log_path: str,
         notify: bool,
+        memory_mode: str = "fixed",
     ) -> Job:
         if not command:
             raise ValueError("command cannot be empty")
         if memory_mb < 1 or reserve_mb < 0 or stable_samples < 1 or max_retries < 0:
             raise ValueError("invalid resource or retry value")
+        if memory_mode not in {"fixed", "auto"}:
+            raise ValueError("memory_mode must be fixed or auto")
         if max_utilization is not None and not 0 <= max_utilization <= 100:
             raise ValueError("max_utilization must be in [0, 100]")
         now = utcnow()
@@ -162,10 +203,10 @@ class QueueDB:
                 """
                 INSERT INTO jobs (
                     name, command_json, cwd, env_json, gpu_allowlist_json,
-                    memory_mb, reserve_mb, max_utilization, stable_samples,
+                    memory_mb, memory_mode, reserve_mb, max_utilization, stable_samples,
                     priority, status, exclusive, dependency_id, max_retries,
                     retry_on_oom, log_path, notify, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     name,
@@ -174,6 +215,7 @@ class QueueDB:
                     json.dumps(env, ensure_ascii=False, sort_keys=True),
                     json.dumps(list(gpu_allowlist)) if gpu_allowlist else None,
                     memory_mb,
+                    memory_mode,
                     reserve_mb,
                     max_utilization,
                     stable_samples,
@@ -272,13 +314,21 @@ class QueueDB:
                 ),
             )
 
-    def claim(self, job_id: int, gpu_index: int) -> bool:
+    def claim(
+        self,
+        job_id: int,
+        gpu_index: int,
+        *,
+        launch_free_memory_mb: int | None = None,
+        launch_total_memory_mb: int | None = None,
+    ) -> bool:
         with self.transaction(immediate=True) as connection:
             cursor = connection.execute(
                 """
                 UPDATE jobs SET status=?, assigned_gpu=?, attempt=attempt+1,
                     updated_at=?, started_at=COALESCE(started_at, ?), error=NULL,
-                    failure_kind=NULL, cancel_requested=0
+                    failure_kind=NULL, cancel_requested=0,
+                    launch_free_memory_mb=?, launch_total_memory_mb=?
                 WHERE id=? AND status IN (?, ?, ?)
                 """,
                 (
@@ -286,6 +336,8 @@ class QueueDB:
                     gpu_index,
                     utcnow(),
                     utcnow(),
+                    launch_free_memory_mb,
+                    launch_total_memory_mb,
                     job_id,
                     JobStatus.QUEUED.value,
                     JobStatus.WAITING_MEMORY.value,
@@ -337,10 +389,25 @@ class QueueDB:
             connection.execute(
                 """
                 UPDATE jobs SET status=?, exit_code=?, error=?, failure_kind=?,
-                    finished_at=?, updated_at=?, pid=NULL, pgid=NULL, worker_pid=NULL
+                    finished_at=?, updated_at=?, pid=NULL, pgid=NULL, worker_pid=NULL,
+                    memory_mb=CASE
+                        WHEN ?=? AND memory_mode='auto'
+                        THEN MAX(memory_mb, peak_memory_mb)
+                        ELSE memory_mb
+                    END
                 WHERE id=?
                 """,
-                (status, exit_code, error, failure_kind, utcnow(), utcnow(), job_id),
+                (
+                    status,
+                    exit_code,
+                    error,
+                    failure_kind,
+                    utcnow(),
+                    utcnow(),
+                    status,
+                    JobStatus.COMPLETED.value,
+                    job_id,
+                ),
             )
 
     def fail_if_active(
@@ -373,16 +440,60 @@ class QueueDB:
             )
         return cursor.rowcount == 1
 
-    def requeue_after_oom(self, job_id: int, *, new_memory_mb: int, error: str) -> None:
+    def requeue_after_oom(
+        self,
+        job_id: int,
+        *,
+        new_memory_mb: int,
+        error: str,
+        requested_mb: int | None = None,
+    ) -> None:
         with self.connect() as connection:
             connection.execute(
                 """
                 UPDATE jobs SET status=?, memory_mb=?, error=?, failure_kind='oom',
                     assigned_gpu=NULL, pid=NULL, pgid=NULL, worker_pid=NULL,
-                    exit_code=NULL, cancel_requested=0, updated_at=? WHERE id=?
+                    exit_code=NULL, cancel_requested=0, oom_count=oom_count+1,
+                    last_oom_requested_mb=?, updated_at=? WHERE id=?
                 """,
-                (JobStatus.RETRY_WAIT.value, new_memory_mb, error, utcnow(), job_id),
+                (
+                    JobStatus.RETRY_WAIT.value,
+                    new_memory_mb,
+                    error,
+                    requested_mb,
+                    utcnow(),
+                    job_id,
+                ),
             )
+
+    def fail_impossible_memory(
+        self,
+        job_id: int,
+        *,
+        required_mb: int,
+        maximum_mb: int,
+    ) -> bool:
+        now = utcnow()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs SET status=?, exit_code=NULL,
+                    error=?, failure_kind='oom_exceeds_device', finished_at=?, updated_at=?,
+                    assigned_gpu=NULL, pid=NULL, pgid=NULL, worker_pid=NULL
+                WHERE id=? AND status IN (?, ?, ?)
+                """,
+                (
+                    JobStatus.FAILED.value,
+                    f"learned required free memory {required_mb}MB exceeds maximum eligible GPU memory {maximum_mb}MB",
+                    now,
+                    now,
+                    job_id,
+                    JobStatus.QUEUED.value,
+                    JobStatus.WAITING_MEMORY.value,
+                    JobStatus.RETRY_WAIT.value,
+                ),
+            )
+        return cursor.rowcount == 1
 
     def request_cancel(self, job_id: int) -> Job:
         with self.transaction(immediate=True) as connection:
@@ -409,24 +520,52 @@ class QueueDB:
                 )
         return self.get(job_id)
 
-    def retry(self, job_id: int, *, memory_mb: int | None = None, reset_attempts: bool = False) -> Job:
+    def retry(
+        self,
+        job_id: int,
+        *,
+        memory_mb: int | None = None,
+        memory_mode: str | None = None,
+        reset_attempts: bool = False,
+    ) -> Job:
         with self.transaction(immediate=True) as connection:
             row = connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if row is None:
                 raise KeyError(f"job {job_id} not found")
             if str(row["status"]) not in TERMINAL_STATUSES:
                 raise ValueError("only terminal jobs can be retried")
+            new_mode = str(memory_mode or row["memory_mode"])
+            if new_mode not in {"fixed", "auto"}:
+                raise ValueError("memory_mode must be fixed or auto")
             new_memory = int(memory_mb if memory_mb is not None else row["memory_mb"])
             if new_memory < 1:
                 raise ValueError("memory_mb must be positive")
+            reset_learning = memory_mode is not None
             connection.execute(
                 """
-                UPDATE jobs SET status=?, memory_mb=?, assigned_gpu=NULL, pid=NULL,
+                UPDATE jobs SET status=?, memory_mb=?, memory_mode=?, assigned_gpu=NULL, pid=NULL,
                     pgid=NULL, worker_pid=NULL, exit_code=NULL, cancel_requested=0,
                     error=NULL, failure_kind=NULL, finished_at=NULL,
+                    retry_on_oom=CASE WHEN ?='auto' THEN 1 ELSE retry_on_oom END,
+                    oom_count=CASE WHEN ? THEN 0 ELSE oom_count END,
+                    launch_free_memory_mb=CASE WHEN ? THEN NULL ELSE launch_free_memory_mb END,
+                    launch_total_memory_mb=CASE WHEN ? THEN NULL ELSE launch_total_memory_mb END,
+                    last_oom_requested_mb=CASE WHEN ? THEN NULL ELSE last_oom_requested_mb END,
                     attempt=CASE WHEN ? THEN 0 ELSE attempt END, updated_at=? WHERE id=?
                 """,
-                (JobStatus.QUEUED.value, new_memory, int(reset_attempts), utcnow(), job_id),
+                (
+                    JobStatus.QUEUED.value,
+                    new_memory,
+                    new_mode,
+                    new_mode,
+                    int(reset_learning),
+                    int(reset_learning),
+                    int(reset_learning),
+                    int(reset_learning),
+                    int(reset_attempts),
+                    utcnow(),
+                    job_id,
+                ),
             )
         return self.get(job_id)
 

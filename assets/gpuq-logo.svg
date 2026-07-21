@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" role="img" aria-labelledby="title desc">
+  <title id="title">gpuq logo</title>
+  <desc id="desc">A queue flowing into a GPU chip whose free-memory gauge forms the letter Q.</desc>
+  <defs>
+    <linearGradient id="bg" x1="72" y1="52" x2="570" y2="596" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101C35"/>
+      <stop offset="1" stop-color="#050A13"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="182" y1="184" x2="486" y2="474" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5EEAD4"/>
+      <stop offset="0.55" stop-color="#22D3EE"/>
+      <stop offset="1" stop-color="#60A5FA"/>
+    </linearGradient>
+    <linearGradient id="queue" x1="62" y1="212" x2="206" y2="340" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A7F3D0"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="640" height="640" rx="128" fill="url(#bg)"/>
+  <circle cx="506" cy="116" r="88" fill="#22D3EE" opacity="0.055"/>
+  <circle cx="105" cy="520" r="125" fill="#60A5FA" opacity="0.045"/>
+
+  <!-- Chip pins -->
+  <g fill="#17314A">
+    <rect x="220" y="92" width="22" height="74" rx="11"/>
+    <rect x="278" y="92" width="22" height="74" rx="11"/>
+    <rect x="336" y="92" width="22" height="74" rx="11"/>
+    <rect x="394" y="92" width="22" height="74" rx="11"/>
+    <rect x="220" y="474" width="22" height="74" rx="11"/>
+    <rect x="278" y="474" width="22" height="74" rx="11"/>
+    <rect x="336" y="474" width="22" height="74" rx="11"/>
+    <rect x="394" y="474" width="22" height="74" rx="11"/>
+    <rect x="92" y="220" width="74" height="22" rx="11"/>
+    <rect x="92" y="278" width="74" height="22" rx="11"/>
+    <rect x="92" y="336" width="74" height="22" rx="11"/>
+    <rect x="474" y="220" width="74" height="22" rx="11"/>
+    <rect x="474" y="278" width="74" height="22" rx="11"/>
+    <rect x="474" y="336" width="74" height="22" rx="11"/>
+  </g>
+
+  <!-- GPU body -->
+  <rect x="150" y="150" width="340" height="340" rx="74" fill="#0A1728" stroke="#1D4058" stroke-width="12"/>
+  <rect x="172" y="172" width="296" height="296" rx="56" fill="none" stroke="#163047" stroke-width="3"/>
+
+  <!-- Queue entering the chip -->
+  <g fill="none" stroke="url(#queue)" stroke-linecap="round">
+    <path d="M68 231H174" stroke-width="14" opacity="0.52"/>
+    <path d="M92 289H174" stroke-width="14" opacity="0.76"/>
+    <path d="M116 347H174" stroke-width="14"/>
+  </g>
+  <g fill="#5EEAD4">
+    <circle cx="68" cy="231" r="10" opacity="0.52"/>
+    <circle cx="92" cy="289" r="10" opacity="0.76"/>
+    <circle cx="116" cy="347" r="10"/>
+  </g>
+
+  <!-- Q-shaped free-VRAM gauge -->
+  <circle cx="325" cy="304" r="104" fill="none" stroke="#163148" stroke-width="30"/>
+  <path d="M251 377A104 104 0 1 1 405 367" fill="none" stroke="url(#signal)" stroke-width="30" stroke-linecap="round" filter="url(#glow)"/>
+  <path d="M385 363L444 425" fill="none" stroke="url(#signal)" stroke-width="30" stroke-linecap="round"/>
+  <path d="M437 390L447 429L408 420" fill="url(#signal)"/>
+
+  <!-- Small memory cells -->
+  <g fill="#5EEAD4">
+    <rect x="256" y="286" width="28" height="42" rx="8" opacity="0.35"/>
+    <rect x="294" y="270" width="28" height="58" rx="8" opacity="0.55"/>
+    <rect x="332" y="250" width="28" height="78" rx="8" opacity="0.78"/>
+    <rect x="370" y="226" width="28" height="102" rx="8"/>
+  </g>
+
+  <!-- Opportunity spark -->
+  <path d="M462 148L471 171L494 180L471 189L462 212L453 189L430 180L453 171Z" fill="#A7F3D0" opacity="0.95"/>
+</svg>

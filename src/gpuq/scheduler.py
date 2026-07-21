@@ -43,6 +43,28 @@ def process_exists(pid: int) -> bool:
     return True
 
 
+def runner_command(state_dir: str, job_id: int, *, frozen: bool | None = None) -> list[str]:
+    is_frozen = getattr(sys, "frozen", False) if frozen is None else frozen
+    if is_frozen:
+        return [
+            sys.executable,
+            "--gpuq-internal-runner",
+            "--state-dir",
+            state_dir,
+            "--job-id",
+            str(job_id),
+        ]
+    return [
+        sys.executable,
+        "-m",
+        "gpuq.runner",
+        "--state-dir",
+        state_dir,
+        "--job-id",
+        str(job_id),
+    ]
+
+
 class Scheduler:
     def __init__(
         self,
@@ -101,10 +123,23 @@ class Scheduler:
                 if job.worker_pid is not None
                 else 0
             )
+            target_memory = job.memory_mb
+            if (
+                job.is_uncalibrated_auto_probe
+                and job.launch_free_memory_mb is not None
+            ):
+                # Until the first probe succeeds or OOMs, its true peak is
+                # unknown.  Reserve the schedulable free region it saw at
+                # launch so gpuq does not start another job beside it and
+                # invalidate the measurement.
+                target_memory = max(
+                    target_memory,
+                    job.launch_free_memory_mb - job.reserve_mb,
+                )
             reservations[job.assigned_gpu] = GPUReservation(
                 outstanding_memory_mb=(
                     current.outstanding_memory_mb
-                    + max(0, job.memory_mb - observed)
+                    + max(0, target_memory - observed)
                 ),
                 reserve_mb=max(current.reserve_mb, job.reserve_mb),
                 active_jobs=current.active_jobs + 1,
@@ -189,6 +224,38 @@ class Scheduler:
         self.stability = {key: value for key, value in self.stability.items() if key in alive_keys}
         return decisions
 
+    def fail_impossible_auto_jobs(
+        self,
+        jobs: list[Job],
+        states: list[GPUState],
+    ) -> list[Job]:
+        """Fail calibrated auto jobs that cannot fit on any eligible card."""
+        runnable: list[Job] = []
+        for job in jobs:
+            if not job.is_auto_memory or job.oom_count == 0:
+                runnable.append(job)
+                continue
+            eligible_states = [
+                state
+                for state in states
+                if job.gpu_allowlist is None or state.index in job.gpu_allowlist
+            ]
+            if not eligible_states:
+                # The allowlisted device may be temporarily undiscoverable;
+                # lack of a sample is not evidence of an impossible request.
+                runnable.append(job)
+                continue
+            maximum_mb = max(state.total_memory_mb for state in eligible_states)
+            if job.required_free_memory_mb > maximum_mb:
+                self.db.fail_impossible_memory(
+                    job.id,
+                    required_mb=job.required_free_memory_mb,
+                    maximum_mb=maximum_mb,
+                )
+                continue
+            runnable.append(job)
+        return runnable
+
     def refresh_peaks(self) -> None:
         for job in self.db.active():
             if job.worker_pid is None:
@@ -203,6 +270,7 @@ class Scheduler:
         states = self.backend.sample()
         self.refresh_peaks()
         jobs = self.db.runnable()
+        jobs = self.fail_impossible_auto_jobs(jobs, states)
         decisions = self.decisions(jobs, states)
         if not decisions:
             if not dry_run:
@@ -225,7 +293,12 @@ class Scheduler:
             self.stability[(job.id, decision.gpu_index)] = 0
             self.db.set_waiting_memory(job.id)
             return None
-        if not self.db.claim(job.id, state.index):
+        if not self.db.claim(
+            job.id,
+            state.index,
+            launch_free_memory_mb=state.free_memory_mb,
+            launch_total_memory_mb=state.total_memory_mb,
+        ):
             return None
         claimed = self.db.get(job.id)
         try:
@@ -248,15 +321,7 @@ class Scheduler:
         if self.settings.config_path is not None:
             environment["GPUQ_CONFIG"] = str(self.settings.config_path)
         process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "gpuq.runner",
-                "--state-dir",
-                str(self.settings.state_dir),
-                "--job-id",
-                str(job.id),
-            ],
+            runner_command(str(self.settings.state_dir), job.id),
             env=environment,
             start_new_session=True,
             stdout=subprocess.DEVNULL,

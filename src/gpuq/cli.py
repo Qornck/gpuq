@@ -3,14 +3,19 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import re
+import select
 import shlex
 import sys
+import termios
 import time
+import tty
 import uuid
 
+from . import __version__
 from .config import Settings, ensure_state_dirs, load_settings
 from .db import QueueDB
 from .gpu import NvidiaSMIBackend
@@ -44,6 +49,28 @@ def _parse_gpus(values: list[str] | None) -> tuple[int, ...] | None:
     return tuple(result)
 
 
+def _parse_memory(value: str) -> int | str:
+    if value.strip().lower() == "auto":
+        return "auto"
+    try:
+        memory_mb = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("memory must be a positive MB value or 'auto'") from error
+    if memory_mb < 1:
+        raise argparse.ArgumentTypeError("memory must be a positive MB value or 'auto'")
+    return memory_mb
+
+
+def _positive_int(value: str) -> int:
+    try:
+        result = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("value must be a positive integer") from error
+    if result < 1:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return result
+
+
 def _slug(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-.")
     return cleaned[:60] or "job"
@@ -61,11 +88,84 @@ def _db(args: argparse.Namespace) -> tuple[Settings, QueueDB]:
 
 def _job_line(job: Job) -> str:
     gpu = "-" if job.assigned_gpu is None else str(job.assigned_gpu)
-    resources = f"{job.memory_mb}+{job.reserve_mb}MB"
+    if job.is_auto_memory:
+        estimate = "probe" if job.oom_count == 0 else f">={job.memory_mb}"
+        resources = f"auto:{estimate}+{job.reserve_mb}MB"
+        attempts = f"{job.attempt}/∞"
+    else:
+        resources = f"{job.memory_mb}+{job.reserve_mb}MB"
+        attempts = f"{job.attempt}/{job.max_retries + 1}"
     return (
         f"{job.id:5d}  {job.status:18s}  p={job.priority:4d}  gpu={gpu:>2s}  "
-        f"mem={resources:>14s}  try={job.attempt}/{job.max_retries + 1}  {job.name}"
+        f"mem={resources:>22s}  try={attempts:>7s}  {job.name}"
     )
+
+
+def _list_header() -> str:
+    return "   ID  STATUS              PRIORITY/GPU/MEMORY                         NAME"
+
+
+def _job_page(jobs: list[Job], page: int, page_size: int) -> str:
+    pages = max(1, math.ceil(len(jobs) / page_size))
+    page = min(max(0, page), pages - 1)
+    start = page * page_size
+    lines = [_list_header(), *(_job_line(job) for job in jobs[start : start + page_size])]
+    lines.extend(
+        [
+            "",
+            f"第 {page + 1}/{pages} 页（每页 {page_size} 条）  ←/→ 翻页，q 或 Esc 退出",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _read_pager_key(file_descriptor: int) -> str:
+    first = os.read(file_descriptor, 1)
+    if first in {b"q", b"Q"}:
+        return "quit"
+    if first != b"\x1b":
+        return "other"
+    ready, _, _ = select.select([file_descriptor], [], [], 0.05)
+    if not ready:
+        return "quit"
+    second = os.read(file_descriptor, 1)
+    if second != b"[":
+        return "quit"
+    ready, _, _ = select.select([file_descriptor], [], [], 0.05)
+    if not ready:
+        return "quit"
+    third = os.read(file_descriptor, 1)
+    if third == b"D":
+        return "left"
+    if third == b"C":
+        return "right"
+    return "other"
+
+
+def _interactive_job_list(jobs: list[Job], page_size: int) -> None:
+    file_descriptor = sys.stdin.fileno()
+    original = termios.tcgetattr(file_descriptor)
+    page = 0
+    pages = max(1, math.ceil(len(jobs) / page_size))
+    try:
+        tty.setcbreak(file_descriptor)
+        # Use the terminal's alternate screen so paging never pollutes the
+        # caller's scrollback.  Restore both screen and cursor in ``finally``.
+        sys.stdout.write("\x1b[?1049h\x1b[?25l")
+        while True:
+            sys.stdout.write("\x1b[2J\x1b[H" + _job_page(jobs, page, page_size))
+            sys.stdout.flush()
+            key = _read_pager_key(file_descriptor)
+            if key == "quit":
+                break
+            if key == "left":
+                page = max(0, page - 1)
+            elif key == "right":
+                page = min(pages - 1, page + 1)
+    finally:
+        termios.tcsetattr(file_descriptor, termios.TCSADRAIN, original)
+        sys.stdout.write("\x1b[?25h\x1b[?1049l")
+        sys.stdout.flush()
 
 
 def command_init(args: argparse.Namespace) -> int:
@@ -113,13 +213,16 @@ def command_submit(args: argparse.Namespace) -> int:
     )
     reserve = settings.default_reserve_mb if args.reserve_mb is None else args.reserve_mb
     stable = settings.default_stable_samples if args.stable_samples is None else args.stable_samples
+    memory_mode = "auto" if args.memory_mb == "auto" else "fixed"
+    memory_mb = 1 if memory_mode == "auto" else int(args.memory_mb)
     job = db.submit(
         name=name,
         command=command,
         cwd=str(cwd),
         env=_parse_env(args.env),
         gpu_allowlist=_parse_gpus(args.gpu),
-        memory_mb=args.memory_mb,
+        memory_mb=memory_mb,
+        memory_mode=memory_mode,
         reserve_mb=reserve,
         max_utilization=args.max_utilization,
         stable_samples=stable,
@@ -127,13 +230,19 @@ def command_submit(args: argparse.Namespace) -> int:
         exclusive=args.exclusive,
         dependency_id=args.after,
         max_retries=args.max_retries,
-        retry_on_oom=args.retry_on_oom,
+        retry_on_oom=(True if memory_mode == "auto" else args.retry_on_oom),
         log_path=str(log_path),
         notify=not args.no_notify,
     )
     print(f"submitted job {job.id}: {job.name}")
     print(f"command: {shlex.join(job.command)}")
-    print(f"requested: {job.memory_mb}MB + {job.reserve_mb}MB reserve")
+    if job.is_auto_memory:
+        print(
+            f"requested: auto probe + {job.reserve_mb}MB reserve; "
+            "only recognized OOMs learn and retry without a count limit"
+        )
+    else:
+        print(f"requested: {job.memory_mb}MB + {job.reserve_mb}MB reserve")
     print(f"log: {job.log_path}")
     return 0
 
@@ -147,7 +256,15 @@ def command_list(args: argparse.Namespace) -> int:
     if not jobs:
         print("queue is empty")
         return 0
-    print("   ID  STATUS              PRIORITY/GPU/MEMORY                 NAME")
+    if (
+        not args.no_pager
+        and len(jobs) > args.page_size
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+    ):
+        _interactive_job_list(jobs, args.page_size)
+        return 0
+    print(_list_header())
     for job in jobs:
         print(_job_line(job))
     return 0
@@ -175,12 +292,22 @@ def command_cancel(args: argparse.Namespace) -> int:
 
 def command_retry(args: argparse.Namespace) -> int:
     _, db = _db(args)
+    memory_mode = None
+    memory_mb = None
+    if args.memory_mb == "auto":
+        memory_mode = "auto"
+        memory_mb = 1
+    elif args.memory_mb is not None:
+        memory_mode = "fixed"
+        memory_mb = int(args.memory_mb)
     job = db.retry(
         args.job_id,
-        memory_mb=args.memory_mb,
+        memory_mb=memory_mb,
+        memory_mode=memory_mode,
         reset_attempts=args.reset_attempts,
     )
-    print(f"job {job.id} requeued with memory={job.memory_mb}MB")
+    memory_text = "auto" if job.is_auto_memory else f"{job.memory_mb}MB"
+    print(f"job {job.id} requeued with memory={memory_text}")
     return 0
 
 
@@ -308,6 +435,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--state-dir", help="覆盖状态目录，默认 ~/.local/state/gpuq")
     parser.add_argument("--config", help="覆盖配置文件，默认 ~/.config/gpuq/config.toml")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="subcommand", required=True)
 
     init = sub.add_parser("init", help="初始化 SQLite 状态目录和示例配置")
@@ -315,7 +443,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     submit = sub.add_parser("submit", help="提交一个等待 GPU 资源的任务")
     submit.add_argument("--name", help="任务显示名称；默认取可执行文件名")
-    submit.add_argument("--memory-mb", "--memory", type=int, required=True, help="预计峰值 GPU 显存，单位 MB")
+    submit.add_argument(
+        "--memory-mb",
+        "--memory",
+        type=_parse_memory,
+        default="auto",
+        help="预计峰值 GPU 显存（MB），或 auto；默认 auto，仅在 OOM 时学习重试",
+    )
     submit.add_argument("--reserve-mb", "--reserve", type=int, help="额外安全余量；默认读取配置")
     submit.add_argument("--gpu", action="append", help="允许的物理 GPU，例如 --gpu 0,1；可重复")
     submit.add_argument(
@@ -329,8 +463,17 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--cwd", help="任务工作目录；默认当前目录")
     submit.add_argument("--env", action="append", default=[], metavar="KEY=VALUE", help="附加环境变量；可重复")
     submit.add_argument("--after", type=int, help="仅在指定任务成功后运行")
-    submit.add_argument("--max-retries", type=int, default=0, help="初次运行失败后最多自动重试次数")
-    submit.add_argument("--retry-on-oom", action="store_true", help="检测到 OOM 时提高显存估计并重新排队")
+    submit.add_argument(
+        "--max-retries",
+        type=int,
+        default=0,
+        help="固定显存模式下，初次运行后的 OOM 自动重试次数；auto 模式忽略",
+    )
+    submit.add_argument(
+        "--retry-on-oom",
+        action="store_true",
+        help="固定显存模式下检测到 OOM 时提高估计并重排；auto 模式始终启用",
+    )
     submit.add_argument("--log", help="日志路径；默认位于状态目录 logs/")
     submit.add_argument("--no-notify", action="store_true", help="禁止本任务完成/失败通知")
     submit.add_argument("command", nargs=argparse.REMAINDER, help="在 -- 之后给出原始命令和参数")
@@ -340,6 +483,13 @@ def build_parser() -> argparse.ArgumentParser:
     listing.add_argument("--status", action="append", help="按状态过滤；可重复")
     listing.add_argument("--limit", type=int, default=200)
     listing.add_argument("--json", action="store_true")
+    listing.add_argument(
+        "--page-size",
+        type=_positive_int,
+        default=20,
+        help="交互列表每页条数；默认 20",
+    )
+    listing.add_argument("--no-pager", action="store_true", help="即使在终端中也禁用交互翻页")
     listing.set_defaults(function=command_list)
 
     show = sub.add_parser("show", help="查看一个任务的完整字段")
@@ -354,7 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     retry = sub.add_parser("retry", help="手动重新排队一个终态任务")
     retry.add_argument("job_id", type=int)
-    retry.add_argument("--memory-mb", "--memory", type=int, help="覆盖新的显存估计")
+    retry.add_argument("--memory-mb", "--memory", type=_parse_memory, help="覆盖显存估计，或切换为 auto")
     retry.add_argument("--reset-attempts", action="store_true", help="将 attempt 计数清零")
     retry.set_defaults(function=command_retry)
 

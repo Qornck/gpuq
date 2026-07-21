@@ -4,13 +4,14 @@ import argparse
 import math
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import time
 
 from .config import load_settings
 from .db import QueueDB, utcnow
-from .models import JobStatus
+from .models import Job, JobStatus
 from .notify import notify
 
 
@@ -19,8 +20,27 @@ OOM_MARKERS = (
     "cuda error: out of memory",
     "cublas_status_alloc_failed",
     "hip out of memory",
-    "outofmemoryerror",
 )
+
+OOM_ALLOCATION_PATTERN = re.compile(
+    r"tried\s+to\s+allocate\s+"
+    r"(?P<amount>[0-9]+(?:\.[0-9]+)?)\s*"
+    r"(?P<unit>bytes?|[kmgt]i?b)",
+    re.IGNORECASE,
+)
+
+OOM_ALLOCATION_UNITS_MB = {
+    "byte": 1 / (1024 * 1024),
+    "bytes": 1 / (1024 * 1024),
+    "kb": 1 / 1024,
+    "kib": 1 / 1024,
+    "mb": 1,
+    "mib": 1,
+    "gb": 1024,
+    "gib": 1024,
+    "tb": 1024 * 1024,
+    "tib": 1024 * 1024,
+}
 
 
 def tail_text(path: str | Path, maximum_bytes: int = 131072) -> str:
@@ -37,6 +57,36 @@ def tail_text(path: str | Path, maximum_bytes: int = 131072) -> str:
 def is_oom_failure(text: str) -> bool:
     lowered = text.lower()
     return any(marker in lowered for marker in OOM_MARKERS)
+
+
+def parse_oom_requested_mb(text: str) -> int | None:
+    """Extract the largest allocation requested by a recognizable OOM message."""
+    requests: list[int] = []
+    for match in OOM_ALLOCATION_PATTERN.finditer(text):
+        amount = float(match.group("amount"))
+        multiplier = OOM_ALLOCATION_UNITS_MB[match.group("unit").lower()]
+        requests.append(max(1, int(math.ceil(amount * multiplier))))
+    return max(requests) if requests else None
+
+
+def learned_auto_memory_mb(current: Job, log_tail: str) -> tuple[int, int | None]:
+    """Learn a conservative job-memory floor after an auto-mode OOM.
+
+    ``memory_mb`` excludes the separately configured reserve.  The learned
+    floor must therefore (1) exceed the launch environment that just failed,
+    and (2) cover the observed process peak plus the failed allocation when
+    PyTorch/HIP reports it.
+    """
+    requested_mb = parse_oom_requested_mb(log_tail)
+    launch_floor = max(
+        1,
+        (current.launch_free_memory_mb or current.required_free_memory_mb)
+        - current.reserve_mb
+        + 256,
+    )
+    peak_floor = current.peak_memory_mb + (requested_mb or 0) + 256
+    growth_floor = int(math.ceil(current.memory_mb * 1.25))
+    return max(launch_floor, peak_floor, growth_floor), requested_mb
 
 
 def _send(db: QueueDB, job_id: int, title: str, message: str, state_dir: Path) -> None:
@@ -127,6 +177,25 @@ def execute_job(db: QueueDB, job_id: int, *, state_dir: Path) -> int:
     oom = is_oom_failure(log_tail)
     current = db.get(job_id)
     error = f"command exited with code {return_code}"
+    if oom and current.is_auto_memory:
+        learned, requested_mb = learned_auto_memory_mb(current, log_tail)
+        db.requeue_after_oom(
+            job_id,
+            new_memory_mb=learned,
+            error=error,
+            requested_mb=requested_mb,
+        )
+        allocation = (
+            f"；本次失败分配={requested_mb}MB" if requested_mb is not None else ""
+        )
+        _send(
+            db,
+            job_id,
+            f"gpuq #{job_id} OOM，自动学习后重新排队",
+            f"最低任务显存更新为 {learned}MB{allocation}；OOM 重试不限次数",
+            state_dir,
+        )
+        return return_code
     if oom and current.retry_on_oom and current.attempt <= current.max_retries:
         learned = max(
             int(math.ceil(current.memory_mb * 1.25)),

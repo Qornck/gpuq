@@ -113,6 +113,41 @@ new_estimate = max(ceil(old_estimate * 1.25), observed_peak + 256MB)
 
 然后进入 `retry_wait`。只有 OOM 自动重排；数据错误、断言失败和模型代码异常保留为 `failed`，避免无限重试坏任务。
 
+### 6.1 默认 auto 模式
+
+省略 `--memory`（或显式使用 `--memory auto`）时，首次任务以 1MB 内部哨兵值
+加 `reserve` 通过资源门槛。领取任务时记录该卡的 `launch_free_memory`；校准完成
+之前，调度器把这块启动空闲区对同一 gpuq 队列的其他任务视为已预留。它不能
+阻止未接入本队列的其他用户进程抢占显存。
+
+如果命令以可识别 OOM 退出，设日志中解析到的失败分配为 `requested`（无法解析
+则为 0），新的任务显存下界为：
+
+```text
+max(
+  ceil(old_estimate * 1.25),
+  observed_process_peak + requested + 256MB,
+  launch_free_memory - reserve + 256MB
+)
+```
+
+下一次只有当 `free >= learned_memory + reserve` 连续满足稳定采样条件时才重试。
+auto 模式不使用 `max_retries` 限制 OOM 次数，每次 OOM 都继续抬高下界；但它
+绝不是任意错误重试：非 OOM 退出立即 `failed/command`，启动和 runner 异常也
+立即失败。
+
+若一次 OOM 后学出的 `learned_memory + reserve` 严格大于当前 allowlist 内任一
+可见单卡的最大总显存，调度器将任务终止为：
+
+```text
+status=failed
+failure_kind=oom_exceeds_device
+```
+
+这避免不可能运行的任务永久停留在 `waiting_memory`。OOM 识别依赖常见
+CUDA/HIP 错误文本；自定义框架若吞掉或改写 OOM，gpuq 会按普通命令错误失败，
+不会冒险无限重跑。
+
 ## 7. 峰值显存的局限
 
 daemon 通过 `nvidia-smi` 按 worker PID 采样峰值。以下情况可能低估：

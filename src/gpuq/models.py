@@ -57,6 +57,7 @@ class Job:
     env: dict[str, str]
     gpu_allowlist: tuple[int, ...] | None
     memory_mb: int
+    memory_mode: str
     reserve_mb: int
     max_utilization: int | None
     stable_samples: int
@@ -77,6 +78,10 @@ class Job:
     error: str | None
     failure_kind: str | None
     peak_memory_mb: int
+    oom_count: int
+    launch_free_memory_mb: int | None
+    launch_total_memory_mb: int | None
+    last_oom_requested_mb: int | None
     notify: bool
     created_at: str
     updated_at: str
@@ -87,6 +92,14 @@ class Job:
     def required_free_memory_mb(self) -> int:
         return self.memory_mb + self.reserve_mb
 
+    @property
+    def is_auto_memory(self) -> bool:
+        return self.memory_mode == "auto"
+
+    @property
+    def is_uncalibrated_auto_probe(self) -> bool:
+        return self.is_auto_memory and self.oom_count == 0 and self.memory_mb == 1
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -96,6 +109,7 @@ class Job:
             "env": dict(self.env),
             "gpu_allowlist": list(self.gpu_allowlist) if self.gpu_allowlist else None,
             "memory_mb": self.memory_mb,
+            "memory_mode": self.memory_mode,
             "reserve_mb": self.reserve_mb,
             "max_utilization": self.max_utilization,
             "stable_samples": self.stable_samples,
@@ -116,6 +130,10 @@ class Job:
             "error": self.error,
             "failure_kind": self.failure_kind,
             "peak_memory_mb": self.peak_memory_mb,
+            "oom_count": self.oom_count,
+            "launch_free_memory_mb": self.launch_free_memory_mb,
+            "launch_total_memory_mb": self.launch_total_memory_mb,
+            "last_oom_requested_mb": self.last_oom_requested_mb,
             "notify": self.notify,
             "created_at": self.created_at,
             "updated_at": self.updated_at,

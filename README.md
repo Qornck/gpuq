@@ -1,137 +1,222 @@
-# gpuq：个人机会式 GPU 任务队列
+<p align="center">
+  <img src="assets/gpuq-logo.svg" width="180" alt="gpuq logo">
+</p>
 
-`gpuq` 面向这样的服务器环境：多人直接运行 CUDA 程序，没有强制 Slurm，空闲显存会随其他用户任务变化。它不会接管整台服务器，而是在当前用户范围内维护任务队列，发现某张 GPU 有足够显存时自动启动任务。
+<h1 align="center">gpuq</h1>
 
-核心原则：
+<p align="center"><strong>Queue jobs. Catch free VRAM.</strong></p>
+<p align="center">Stop watching GPUs. Let free memory call the next job.</p>
 
-- 以**空闲显存**作为硬可行条件，可选限制 GPU 利用率；多个 GPU 均可行时优先选择低负载设备；
-- 不要求整张卡空闲，允许在显存足够时与既有任务共存；
-- 连续多个采样周期满足条件后才启动，减少瞬时空闲误判；
-- 启动前二次采样，降低检查和 CUDA 分配之间的竞态；
-- 永不抢占、暂停或终止其他用户的进程；
-- 一个任务失败不阻塞队列，记录日志并继续运行下一项；
-- 支持取消、重试、依赖、优先级、OOM 自动提高估计和通知。
+<p align="center">
+  English · <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-它是个人使用的 **opportunistic/backfill scheduler**，不是完整 Slurm。其他用户不使用 `gpuq` 时，工具无法真正预留显存，因此不能从理论上消除资源竞态。
+<p align="center">
+  <a href="https://github.com/lzy248/gpuq/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/lzy248/gpuq/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776AB">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-22c55e"></a>
+</p>
 
-调度 daemon 每个采样周期最多启动一个任务。这样二次显存检查始终针对最新状态；
-若同一张卡还能放下更多任务，后续采样周期会继续启动。
-同一队列已经启动但尚未实际分配的显存会按请求值保留，避免多个慢启动任务在
-CUDA 分配发生前被连续放到同一张卡。
+`gpuq` is a lightweight, per-user opportunistic GPU job queue for shared servers
+without a managed scheduler. It watches free VRAM, waits for a stable window, and
+starts your next job without killing, pausing, or reserving memory from anyone else.
 
-## 安装
+It is deliberately **not a miniature Slurm**. Slurm governs a cluster. `gpuq` helps
+one user stop babysitting an unmanaged GPU box.
 
-要求：Python 3.10+、NVIDIA 驱动和可执行的 `nvidia-smi`。
+## Who is it for?
+
+`gpuq` fits when:
+
+- a lab or team shares a workstation/server by launching CUDA commands directly;
+- you have a backlog of training or evaluation jobs but no Slurm administrator;
+- GPUs are often partially occupied and you want to use leftover VRAM safely;
+- you want a persistent personal queue, logs, dependencies, retries, and notifications;
+- installing a root-level service or taking control of other users' processes is not an option.
+
+Use Slurm, Kubernetes, or another managed scheduler instead when you need multi-node
+jobs, cross-user quotas, fair-share scheduling, accounting, hard reservations,
+preemption, or administrative resource isolation.
+
+## gpuq vs. Slurm
+
+| | gpuq | Slurm |
+|---|---|---|
+| Scope | One user's opportunistic queue | Cluster-wide resource manager |
+| Deployment | User-space Python + SQLite; no root | Administrator-managed control plane |
+| Authority | Observes free VRAM and launches when it fits | Allocates and enforces resources |
+| Other users | Never kills or pauses their processes | Coordinates all enrolled jobs |
+| Partial GPUs | Backfills leftover VRAM | Usually allocates configured GPU resources |
+| Fairness / quotas / accounting | Intentionally absent | Core functionality |
+| Multi-node / distributed allocation | Not supported | Supported |
+| Best fit | Unmanaged shared GPU servers | Managed clusters |
+
+`gpuq` cannot prevent a user outside the queue from allocating memory after its last
+check. It reduces that race with stable samples, a launch-time recheck, safety reserve,
+and OOM learning; it cannot provide Slurm's hard guarantees.
+
+## Highlights
+
+- **Auto VRAM mode by default.** Submit without estimating memory; recognizable
+  CUDA/HIP OOMs teach the queue a higher minimum and retry without a count limit.
+- **Correct failure boundary.** Non-OOM code/data/launch errors fail immediately.
+  A learned request larger than every eligible single GPU terminates as
+  `oom_exceeds_device` instead of waiting forever.
+- **Opportunistic backfill.** Memory is the hard gate; among eligible GPUs, lower
+  utilization wins, with best-fit as a tie-breaker.
+- **Race reduction.** Stable sampling, an authoritative second snapshot, and
+  outstanding reservations for slow-starting jobs reduce accidental overcommit.
+- **Persistent personal queue.** SQLite-backed jobs survive terminals and daemon
+  restarts; dependencies, priorities, cancellation, logs, and notifications are built in.
+- **Interactive queue view.** `gpuq list` shows 20 jobs per page in a TTY; use
+  left/right arrows to move and `q` or `Esc` to exit. An alternate screen keeps
+  scrollback clean; pipes and JSON stay noninteractive.
+- **No preemption.** `gpuq` only controls process groups that it started.
+
+## Requirements
+
+- Linux
+- NVIDIA driver and a working `nvidia-smi`
+- A CUDA workload that addresses the selected visible card as `cuda:0`
+
+The standalone binary does not require Python. A source installation requires Python
+3.10+. The scheduler itself has no third-party runtime Python dependencies.
+
+## Install
+
+### Standalone binary (recommended, Linux x86_64)
 
 ```bash
-cd /home/liuzeyang/projects/gpuq
+VERSION=0.2.0
+cd /tmp
+curl -fLO "https://github.com/lzy248/gpuq/releases/download/v${VERSION}/gpuq-v${VERSION}-linux-x86_64.tar.gz"
+curl -fLO "https://github.com/lzy248/gpuq/releases/download/v${VERSION}/gpuq-v${VERSION}-linux-x86_64.tar.gz.sha256"
+sha256sum -c "gpuq-v${VERSION}-linux-x86_64.tar.gz.sha256"
+tar -xzf "gpuq-v${VERSION}-linux-x86_64.tar.gz"
+install -Dm755 "gpuq-v${VERSION}-linux-x86_64/gpuq" "$HOME/.local/bin/gpuq"
+gpuq --version
+```
+
+Ensure `~/.local/bin` is on `PATH`, then initialize:
+
+```bash
+gpuq init
+gpuq doctor
+```
+
+The release archive also includes the example config, systemd unit, license, and both
+README languages.
+
+### Source install (optional; any supported architecture)
+
+```bash
+git clone https://github.com/lzy248/gpuq.git
+cd gpuq
 python -m pip install --user -e .
 gpuq init
 gpuq doctor
 ```
 
-开发安装和测试：
+## Quick start
 
-```bash
-python -m pip install -e '.[dev]'
-pytest
-```
-
-## 最短使用流程
-
-终端一：启动调度器。
+Start one persistent scheduler for the state directory:
 
 ```bash
 gpuq daemon
 ```
 
-终端二：提交任务。
+Submit a job. Auto memory mode is the default, so `--memory` is optional:
 
 ```bash
 gpuq submit \
-  --name p0_3_flat_reader \
-  --gpu 1 \
-  --memory 5000 \
+  --name train-model \
+  --gpu 0,1 \
   --reserve 1500 \
-  --max-utilization 70 \
   --stable-samples 3 \
-  --cwd /home/liuzeyang/projects/grd \
+  --cwd "$PWD" \
   --env PYTHONPATH=. \
-  -- python train/train_flat_coordinate_reader.py --device cuda:0 --bf16
+  -- python train.py --device cuda:0
 ```
 
-查看状态和日志：
+If you know the peak, opt into a fixed estimate:
+
+```bash
+gpuq submit \
+  --memory 12000 \
+  --reserve 1500 \
+  --retry-on-oom \
+  --max-retries 2 \
+  -- python train.py --device cuda:0
+```
+
+Inspect and control jobs:
 
 ```bash
 gpuq list
 gpuq show 1
 gpuq logs -f 1
-gpuq gpus
-```
-
-取消或重试：
-
-```bash
 gpuq cancel 1
-gpuq retry 1 --memory 6500
+gpuq retry 1 --memory auto
 ```
 
-完整参数见 [CLI 参数手册](docs/cli_reference.md)，调度语义与安全边界见 [调度模型](docs/scheduling.md)。
+### Physical GPU IDs vs. `cuda:0`
 
-## 显存判断
-
-普通任务的基本条件为：
+If the scheduler chooses physical GPU 1, it starts the child with:
 
 ```text
-GPU.free_memory_mb >= job.memory_mb + job.reserve_mb
-```
-
-如果设置 `--max-utilization 60`，还要求采样时 GPU 利用率不超过 60%。条件必须连续满足 `--stable-samples` 次；启动前会再采样一次。
-
-调度器按优先级处理任务。显存满足任务估计与安全余量的 GPU 才会成为候选；多个
-候选同时满足时，首先选择当前 `GPU-Util` 最低的设备。利用率相同时再使用
-best-fit，即选择运行后剩余显存最少的 GPU，尽量为后续大任务保留大块空闲显存。
-
-默认每 10 秒采样一次并要求连续 3 个合格样本。三个样本横跨约 20 秒；考虑任务
-条件可能刚好在采样后满足，实际从满足条件到启动通常约 20–30 秒，启动前还会
-立即复查一次。
-
-## 物理 GPU 与任务内编号
-
-如果调度器选择物理 GPU 1，会为任务设置：
-
-```bash
 CUDA_VISIBLE_DEVICES=1
 ```
 
-因此任务内部只看见一张卡，并应使用 `cuda:0`，而不是 `cuda:1`：
+The child therefore sees that card as `cuda:0`. Pass `cuda:0` to your framework,
+not the original physical index.
 
-```bash
-gpuq submit --gpu 1 --memory 5000 -- python train.py --device cuda:0
+## How auto memory works
+
+```text
+queued
+  │ stable free VRAM >= reserve + 1 MB
+  ▼
+probe run ── success ───────────────► completed
+  │
+  ├─ non-OOM / launch error ───────► failed immediately
+  │
+  └─ recognized CUDA/HIP OOM
+          │ learn a higher minimum
+          ├─ minimum + reserve > largest eligible GPU ─► failed/oom_exceeds_device
+          └─ otherwise ─► retry_wait ─► wait for stable free VRAM ─► run again
 ```
 
-## 任务失败和 OOM
+After an OOM, the learned job-memory floor is the maximum of:
 
-- 命令退出码为 0：`completed`；
-- 非零退出：`failed`，保留 stdout/stderr；
-- 任务失败后 daemon 自动继续检查后续队列；
-- 使用 `--retry-on-oom --max-retries 2` 时，检测到常见 CUDA OOM 文本后，显存估计至少扩大 25%，任务进入 `retry_wait`；
-- 普通代码错误不会自动伪装成显存问题。
-
-例如：
-
-```bash
-gpuq submit \
-  --memory 8000 \
-  --reserve 1500 \
-  --retry-on-oom \
-  --max-retries 2 \
-  -- python train.py
+```text
+ceil(previous estimate × 1.25)
+observed process peak + failed allocation + 256 MB
+launch free memory - reserve + 256 MB
 ```
 
-## 常驻运行
+Only recognized GPU OOMs take this unbounded retry path. This distinction prevents a
+broken command from looping forever. See [Scheduling semantics](docs/scheduling.en.md)
+for exact behavior and limitations.
 
-仓库提供 [systemd 用户服务](systemd/gpuqd.service)：
+## Common commands
+
+| Command | Purpose |
+|---|---|
+| `gpuq init` | Initialize state and an example config |
+| `gpuq submit -- COMMAND...` | Queue a command; auto memory is default |
+| `gpuq list` / `gpuq ls` | Interactive or script-friendly queue view |
+| `gpuq show JOB_ID` | Show full job state and learned memory fields |
+| `gpuq logs -f JOB_ID` | Follow merged stdout/stderr |
+| `gpuq cancel JOB_ID` | Stop only this job's process group |
+| `gpuq retry JOB_ID` | Requeue a terminal job |
+| `gpuq priority JOB_ID N` | Change scheduling priority |
+| `gpuq gpus` | Show the scheduler's GPU snapshot |
+| `gpuq daemon` | Run the persistent scheduling loop |
+| `gpuq doctor` | Check state, database, and GPU discovery |
+
+See the complete [CLI reference](docs/cli_reference.en.md).
+
+## Run as a user service
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -141,40 +226,42 @@ systemctl --user enable --now gpuqd.service
 systemctl --user status gpuqd.service
 ```
 
-服务默认假定 `gpuq` 安装在 `~/.local/bin/gpuq`。如果使用虚拟环境，需要修改 `ExecStart` 为实际绝对路径。
-仓库 unit 使用 `KillMode=process`：重启 scheduler daemon 不会连带杀死独立
-runner 和训练进程。新 daemon 会保留仍存活的任务；若数据库中的 active PID
-全部消失，则将该记录标为 `failed/orphaned`，避免永久伪装成 `running`。
+Adjust `ExecStart` if `gpuq` is installed outside `~/.local/bin`. The supplied unit
+uses `KillMode=process`, so restarting only the daemon does not kill independently
+managed runners and training workers.
 
-## 数据位置
+## Safety model and limitations
 
-默认状态目录：
+`gpuq` never:
 
-```text
-~/.local/state/gpuq/
-├── queue.sqlite3
-├── queue.sqlite3-wal
-├── gpuqd.lock
-└── logs/
+- kills, pauses, or preempts unrelated GPU processes;
+- allocates dummy tensors to reserve VRAM;
+- claims fairness or isolation across users;
+- guarantees that an external process cannot win the launch race.
+
+Version 0.2 manages one physical GPU per job. It does not schedule multi-GPU or
+multi-node commands. Process-level peak sampling can underestimate forked or very
+short-lived allocations. Read [Scheduling semantics](docs/scheduling.en.md) before
+using it for expensive unattended runs.
+
+## Development
+
+```bash
+python -m pip install -e '.[dev]'
+ruff check src tests
+pytest
 ```
 
-配置文件默认位于：
+The test suite uses fake GPU backends and does not require a GPU. Contributions are
+welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Security issues should follow
+[SECURITY.md](SECURITY.md).
 
-```text
-~/.config/gpuq/config.toml
-```
+## Documentation
 
-可通过 `GPUQ_STATE_DIR`、`GPUQ_CONFIG` 或全局 CLI 参数覆盖。
+- [CLI reference](docs/cli_reference.en.md) · [中文](docs/cli_reference.md)
+- [Scheduling semantics and safety](docs/scheduling.en.md) · [中文](docs/scheduling.md)
+- [Changelog](CHANGELOG.md)
 
-## 当前不做的事情
+## License
 
-- 不杀死或抢占其他用户任务；
-- 不创建占位 CUDA tensor 来“预留”显存；
-- 不保证其他用户不会在二次检查后抢先分配；
-- 不提供跨用户公平性、配额、账户和计费；
-- 不自动判断训练是否科学有效，只管理进程与资源；
-- 第一版一次只为一个任务分配一张物理 GPU，不支持单任务多 GPU。
-
-## 许可证
-
-MIT，见 [LICENSE](LICENSE)。
+MIT © Liu Zeyang and gpuq contributors. See [LICENSE](LICENSE).

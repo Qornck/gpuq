@@ -1,6 +1,6 @@
 # gpuq CLI 参数手册
 
-本文覆盖 `gpuq 0.1.0` 的全部公共命令和参数。
+本文覆盖 `gpuq 0.2.0` 的全部公共命令和参数。
 
 ## 全局参数
 
@@ -36,14 +36,17 @@ gpuq submit [OPTIONS] -- COMMAND [ARGUMENTS...]
 
 | 参数 | 必填 | 含义 |
 |---|---:|---|
-| `--memory-mb N` / `--memory N` | 是 | 任务预计峰值 GPU 显存，MB；不含安全余量 |
+| `--memory-mb N|auto` / `--memory N|auto` | 否 | 固定峰值（MB）或自动学习；默认 `auto` |
 | `--reserve-mb N` / `--reserve N` | 否 | 额外留给竞态、驱动波动和估计误差的显存；默认 1024MB |
 | `--gpu LIST` | 否 | 允许使用的物理 GPU，如 `--gpu 1`、`--gpu 0,1`；可重复；省略表示任意卡 |
 | `--max-utilization N` | 否 | 启动时 GPU 利用率硬上限 0–100；省略则不设硬上限，候选卡仍优先选择低利用率 |
 | `--stable-samples N` | 否 | 资源条件必须连续满足的采样次数；默认 3 |
 | `--exclusive` | 否 | 要求无 compute 进程、显存和利用率接近空闲 |
 
-`--memory` 应填写训练过程的峰值，而不是模型权重文件大小。第一次不确定时，建议实际需求上浮 10%～20%，再保留 1～2GB `--reserve`。
+默认可不写 `--memory`。这等价于 `--memory auto`：首次满足 `reserve + 1MB`
+和稳定采样条件后试跑；仅当日志包含可识别 CUDA/HIP OOM 时，才学习新的最低
+显存并等待重试。显式写数字则进入固定估计模式；该数字应是训练峰值而不是权重
+文件大小，并应另留 1～2GB `--reserve`。
 
 ### 调度参数
 
@@ -55,6 +58,10 @@ gpuq submit [OPTIONS] -- COMMAND [ARGUMENTS...]
 | `--retry-on-oom` | 关闭 | 仅检测到 OOM 时自动增加显存估计并重排 |
 
 `--max-retries 2` 表示最多三次总尝试：初次运行加两次重试。
+
+以上重试次数只约束固定显存模式。auto 模式对可识别 OOM 不限次数；普通退出、
+断言、数据或代码错误立即失败。学习出的 `memory + reserve` 一旦超过 allowlist 中
+最大单卡总显存，会以 `failure_kind=oom_exceeds_device` 终止。
 
 ### 进程与日志参数
 
@@ -76,9 +83,15 @@ gpuq submit \
   --gpu 1 \
   --memory 5000 \
   --reserve 1500 \
-  --cwd /home/liuzeyang/projects/grd \
+  --cwd /home/me/project \
   --env PYTHONPATH=. \
   -- python train.py --device cuda:0
+```
+
+让队列自动学习显存（也是默认行为）：
+
+```bash
+gpuq submit --gpu 1 --reserve 1500 -- python train.py --device cuda:0
 ```
 
 只在利用率不高于 50% 时共享：
@@ -127,6 +140,13 @@ gpuq list --limit 1000 --json
 | `--status STATUS` | 状态过滤；可重复 |
 | `--limit N` | 最大行数，默认 200 |
 | `--json` | 输出机器可读 JSON |
+| `--page-size N` | 终端交互模式每页条数，默认 20 |
+| `--no-pager` | 在终端中禁用交互翻页 |
+
+当 stdin/stdout 都是终端、结果超过一页且未使用 `--json/--no-pager` 时，列表
+进入交互模式：按左、右方向键翻页，按 `q` 或 `Esc` 退出。管道、重定向和 JSON
+始终一次性静态输出，便于脚本兼容。交互模式使用终端备用屏幕，退出后恢复原页面，
+不会在滚动历史里留下每次翻页的内容。
 
 ## `gpuq show JOB_ID`
 
@@ -172,11 +192,12 @@ gpuq cancel 21 --force-after 30
 ```bash
 gpuq retry 21
 gpuq retry 21 --memory 8000 --reset-attempts
+gpuq retry 21 --memory auto
 ```
 
 | 参数 | 含义 |
 |---|---|
-| `--memory-mb N` / `--memory N` | 覆盖显存估计 |
+| `--memory-mb N|auto` / `--memory N|auto` | 覆盖估计，或重置为新的 auto 探测 |
 | `--reset-attempts` | 将历史 attempt 计数清零 |
 
 ## `gpuq priority JOB_ID VALUE`
