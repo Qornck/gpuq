@@ -1,0 +1,13 @@
+[Unit]
+Description=Personal opportunistic GPU queue daemon
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/gpuq daemon
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

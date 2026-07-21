@@ -1,0 +1,11 @@
+[gpuq]
+state_dir = "~/.local/state/gpuq"
+poll_seconds = 10
+default_reserve_mb = 1024
+default_stable_samples = 3
+exclusive_max_used_mb = 768
+exclusive_max_utilization = 5
+nvidia_smi = "nvidia-smi"
+
+# 每个参数独立成一个数组元素。支持 {title}、{message}、{job_id}。
+# notify_command = ["notify-send", "{title}", "{message}"]

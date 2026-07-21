@@ -1,0 +1,112 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import shlex
+from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python >=3.11 normally
+    tomllib = None  # type: ignore[assignment]
+
+
+@dataclass(frozen=True)
+class Settings:
+    state_dir: Path
+    poll_seconds: float = 10.0
+    default_reserve_mb: int = 1024
+    default_stable_samples: int = 3
+    exclusive_max_used_mb: int = 768
+    exclusive_max_utilization: int = 5
+    nvidia_smi: str = "nvidia-smi"
+    notify_command: tuple[str, ...] | None = None
+    config_path: Path | None = None
+
+    @property
+    def database_path(self) -> Path:
+        return self.state_dir / "queue.sqlite3"
+
+    @property
+    def logs_dir(self) -> Path:
+        return self.state_dir / "logs"
+
+    @property
+    def lock_path(self) -> Path:
+        return self.state_dir / "gpuqd.lock"
+
+
+def default_state_dir() -> Path:
+    override = os.environ.get("GPUQ_STATE_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / ".local/state/gpuq").resolve()
+
+
+def default_config_path() -> Path:
+    override = os.environ.get("GPUQ_CONFIG")
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / ".config/gpuq/config.toml").resolve()
+
+
+def _positive_int(value: Any, name: str) -> int:
+    result = int(value)
+    if result < 1:
+        raise ValueError(f"{name} must be positive")
+    return result
+
+
+def _nonnegative_int(value: Any, name: str) -> int:
+    result = int(value)
+    if result < 0:
+        raise ValueError(f"{name} must be nonnegative")
+    return result
+
+
+def load_settings(
+    *, state_dir: str | Path | None = None, config_path: str | Path | None = None
+) -> Settings:
+    path = Path(config_path).expanduser().resolve() if config_path else default_config_path()
+    data: dict[str, Any] = {}
+    if path.exists():
+        if tomllib is None:
+            raise RuntimeError("TOML config needs Python 3.11 or the tomli package")
+        with path.open("rb") as handle:
+            loaded = tomllib.load(handle)
+        data = dict(loaded.get("gpuq", loaded))
+    root = Path(state_dir).expanduser().resolve() if state_dir else Path(
+        data.get("state_dir", default_state_dir())
+    ).expanduser().resolve()
+    poll = float(data.get("poll_seconds", 10.0))
+    if poll <= 0:
+        raise ValueError("poll_seconds must be positive")
+    notify = data.get("notify_command")
+    notify_command: tuple[str, ...] | None
+    if notify is None:
+        notify_command = None
+    elif isinstance(notify, str):
+        notify_command = tuple(shlex.split(notify))
+    else:
+        notify_command = tuple(str(part) for part in notify)
+    return Settings(
+        state_dir=root,
+        poll_seconds=poll,
+        default_reserve_mb=_nonnegative_int(
+            data.get("default_reserve_mb", 1024), "default_reserve_mb"
+        ),
+        default_stable_samples=_positive_int(
+            data.get("default_stable_samples", 3), "default_stable_samples"
+        ),
+        exclusive_max_used_mb=int(data.get("exclusive_max_used_mb", 768)),
+        exclusive_max_utilization=int(data.get("exclusive_max_utilization", 5)),
+        nvidia_smi=str(data.get("nvidia_smi", "nvidia-smi")),
+        notify_command=notify_command,
+        config_path=path if path.exists() or config_path is not None else None,
+    )
+
+
+def ensure_state_dirs(settings: Settings) -> None:
+    settings.state_dir.mkdir(parents=True, exist_ok=True)
+    settings.logs_dir.mkdir(parents=True, exist_ok=True)
