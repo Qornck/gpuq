@@ -27,9 +27,19 @@ jobs:
           ./dist/gpuq submit --help
           ./dist/gpuq --gpuq-internal-runner --help
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          body_path: .github/release-notes/${{ github.ref_name }}.md
-          files: |
-            dist/gpuq-v*-linux-x86_64.tar.gz
-            dist/gpuq-v*-linux-x86_64.tar.gz.sha256
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=".github/release-notes/${GITHUB_REF_NAME}.md"
+          archive="dist/gpuq-${GITHUB_REF_NAME}-linux-x86_64.tar.gz"
+          checksum="${archive}.sha256"
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$archive" "$checksum" \
+              --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" --notes-file "$notes"
+          else
+            gh release create "$GITHUB_REF_NAME" "$archive" "$checksum" \
+              --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "$GITHUB_REF_NAME" --notes-file "$notes"
+          fi
