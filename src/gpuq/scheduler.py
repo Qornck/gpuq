@@ -414,4 +414,8 @@ def run_daemon(settings: Settings, *, once: bool = False, dry_run: bool = False)
             break
         deadline = time.monotonic() + settings.poll_seconds
         while not stop and time.monotonic() < deadline:
-            time.sleep(min(0.25, deadline - time.monotonic()))
+            # The second monotonic() call can cross the deadline after the
+            # loop condition was evaluated.  Clamp the remaining duration so
+            # a scheduling delay never turns into ``sleep(-epsilon)`` and
+            # crashes the persistent daemon (or orphan its active workers).
+            time.sleep(max(0.0, min(0.25, deadline - time.monotonic())))
