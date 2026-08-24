@@ -18,6 +18,10 @@ class Settings:
     poll_seconds: float = 10.0
     default_reserve_mb: int = 1024
     default_stable_samples: int = 3
+    auto_probe_hold_seconds: float = 300.0
+    auto_probe_stable_samples: int = 12
+    auto_probe_stability_tolerance_mb: int = 128
+    auto_probe_release_margin_mb: int = 1024
     exclusive_max_used_mb: int = 768
     exclusive_max_utilization: int = 5
     nvidia_smi: str = "nvidia-smi"
@@ -74,12 +78,17 @@ def load_settings(
         with path.open("rb") as handle:
             loaded = tomllib.load(handle)
         data = dict(loaded.get("gpuq", loaded))
-    root = Path(state_dir).expanduser().resolve() if state_dir else Path(
-        data.get("state_dir", default_state_dir())
-    ).expanduser().resolve()
+    root = (
+        Path(state_dir).expanduser().resolve()
+        if state_dir
+        else Path(data.get("state_dir", default_state_dir())).expanduser().resolve()
+    )
     poll = float(data.get("poll_seconds", 10.0))
     if poll <= 0:
         raise ValueError("poll_seconds must be positive")
+    auto_probe_hold = float(data.get("auto_probe_hold_seconds", 300.0))
+    if auto_probe_hold < 0:
+        raise ValueError("auto_probe_hold_seconds must be nonnegative")
     notify = data.get("notify_command")
     notify_command: tuple[str, ...] | None
     if notify is None:
@@ -96,6 +105,19 @@ def load_settings(
         ),
         default_stable_samples=_positive_int(
             data.get("default_stable_samples", 3), "default_stable_samples"
+        ),
+        auto_probe_hold_seconds=auto_probe_hold,
+        auto_probe_stable_samples=_positive_int(
+            data.get("auto_probe_stable_samples", 12),
+            "auto_probe_stable_samples",
+        ),
+        auto_probe_stability_tolerance_mb=_nonnegative_int(
+            data.get("auto_probe_stability_tolerance_mb", 128),
+            "auto_probe_stability_tolerance_mb",
+        ),
+        auto_probe_release_margin_mb=_nonnegative_int(
+            data.get("auto_probe_release_margin_mb", 1024),
+            "auto_probe_release_margin_mb",
         ),
         exclusive_max_used_mb=int(data.get("exclusive_max_used_mb", 768)),
         exclusive_max_utilization=int(data.get("exclusive_max_utilization", 5)),

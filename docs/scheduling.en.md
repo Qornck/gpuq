@@ -31,9 +31,13 @@ window is about 20–30 seconds.
 
 Auto mode is the submit default. Its initial internal job estimate is 1 MB, so it may
 probe once `free >= reserve + 1 MB`. At claim time gpuq stores launch free/total memory.
-Until that first probe succeeds or OOMs, it reserves the launch-time schedulable region
-against other jobs in the same queue. This does not reserve CUDA memory and cannot
-exclude jobs launched outside gpuq.
+It initially reserves the launch-time schedulable region against other jobs in the
+same queue. For a long-running non-exclusive probe, the reservation may shrink to the
+observed peak after at least five minutes and 12 consecutive process-memory samples
+within a 128 MB band. At least 1024 MB remains unavailable as fluctuation margin, and a
+later peak increase raises the reservation floor immediately. The stability window is
+restarted with the daemon. Active exclusive jobs always block same-GPU backfill. This
+does not reserve CUDA memory and cannot exclude jobs launched outside gpuq.
 
 On a recognizable CUDA/HIP OOM, let `requested` be the largest failed allocation parsed
 from the log, or zero when unavailable. The new job-memory floor is:

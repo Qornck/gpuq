@@ -22,6 +22,17 @@ class FakeBackend:
         return None
 
 
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 def gpu(index: int, *, free: int, used: int = 1000, util: int = 10, processes=()) -> GPUState:
     return GPUState(
         index=index,
@@ -267,6 +278,165 @@ def test_uncalibrated_auto_probe_reserves_launch_free_region(
         free=9000,
         used=2000,
         processes=(GPUProcess(102, 1000),),
+    )
+    scheduler = Scheduler(
+        settings=settings,
+        db=db,
+        backend=FakeBackend([state]),
+        process_checker=lambda _pid: True,
+    )
+    assert scheduler.tick(dry_run=True) is None
+
+
+def test_stable_auto_probe_releases_unused_launch_region(
+    settings: Settings, db: QueueDB, tmp_path: Path
+) -> None:
+    settings = replace(
+        settings,
+        auto_probe_hold_seconds=30,
+        auto_probe_stable_samples=3,
+        auto_probe_stability_tolerance_mb=128,
+        auto_probe_release_margin_mb=1024,
+    )
+    probe = submit_job(
+        db,
+        tmp_path,
+        name="auto-probe",
+        memory_mb=1,
+        memory_mode="auto",
+        reserve_mb=1000,
+        stable_samples=1,
+    )
+    mark_running(
+        db,
+        probe.id,
+        gpu_index=0,
+        runner_pid=101,
+        worker_pid=102,
+        launch_free_memory_mb=10000,
+        launch_total_memory_mb=11000,
+    )
+    candidate = submit_job(
+        db,
+        tmp_path,
+        name="candidate",
+        memory_mb=4000,
+        reserve_mb=1000,
+        stable_samples=1,
+    )
+    state = gpu(
+        0,
+        free=6000,
+        used=5000,
+        processes=(GPUProcess(102, 4000),),
+    )
+    clock = FakeClock()
+    scheduler = Scheduler(
+        settings=settings,
+        db=db,
+        backend=FakeBackend([state]),
+        process_checker=lambda _pid: True,
+        clock=clock,
+    )
+    assert scheduler.tick(dry_run=True) is None
+    clock.advance(15)
+    assert scheduler.tick(dry_run=True) is None
+    clock.advance(15)
+    decision = scheduler.tick(dry_run=True)
+    assert decision is not None
+    assert decision.job_id == candidate.id
+    assert decision.outstanding_reservation_mb == 0
+    assert decision.required_memory_mb == 5024
+
+
+def test_auto_probe_memory_spike_resets_stable_window(
+    settings: Settings, db: QueueDB, tmp_path: Path
+) -> None:
+    settings = replace(
+        settings,
+        auto_probe_hold_seconds=0,
+        auto_probe_stable_samples=3,
+        auto_probe_stability_tolerance_mb=128,
+    )
+    probe = submit_job(
+        db,
+        tmp_path,
+        memory_mb=1,
+        memory_mode="auto",
+        reserve_mb=1000,
+        stable_samples=1,
+    )
+    mark_running(
+        db,
+        probe.id,
+        gpu_index=0,
+        runner_pid=101,
+        worker_pid=102,
+        launch_free_memory_mb=10000,
+    )
+    candidate = submit_job(
+        db,
+        tmp_path,
+        memory_mb=3000,
+        reserve_mb=1000,
+        stable_samples=1,
+    )
+    state = gpu(
+        0,
+        free=6000,
+        used=5000,
+        processes=(GPUProcess(102, 4000),),
+    )
+    backend = FakeBackend([state])
+    scheduler = Scheduler(
+        settings=settings,
+        db=db,
+        backend=backend,
+        process_checker=lambda _pid: True,
+    )
+    assert scheduler.tick(dry_run=True) is None
+    assert scheduler.tick(dry_run=True) is None
+    backend.states = [
+        replace(
+            state,
+            free_memory_mb=5600,
+            used_memory_mb=5400,
+            processes=(GPUProcess(102, 4400),),
+        )
+    ]
+    assert scheduler.tick(dry_run=True) is None
+    assert scheduler.tick(dry_run=True) is None
+    decision = scheduler.tick(dry_run=True)
+    assert decision is not None
+    assert decision.job_id == candidate.id
+
+
+def test_active_exclusive_job_blocks_backfill(
+    settings: Settings, db: QueueDB, tmp_path: Path
+) -> None:
+    active = submit_job(
+        db,
+        tmp_path,
+        name="exclusive-active",
+        memory_mb=1000,
+        reserve_mb=1000,
+        stable_samples=1,
+        exclusive=True,
+    )
+    mark_running(db, active.id, gpu_index=0, runner_pid=101, worker_pid=102)
+    submit_job(
+        db,
+        tmp_path,
+        name="candidate",
+        memory_mb=1000,
+        reserve_mb=1000,
+        stable_samples=1,
+    )
+    state = gpu(
+        0,
+        free=8000,
+        used=3000,
+        processes=(GPUProcess(102, 2000),),
     )
     scheduler = Scheduler(
         settings=settings,

@@ -2,6 +2,25 @@
 
 All notable changes are recorded here. / 所有重要变更记录于此。
 
+## Unreleased
+
+### English
+
+- Allow a long-running non-exclusive auto probe to release unused launch-time
+  reservation after a configurable process-memory stability window, while retaining a
+  1 GiB fluctuation margin by default.
+- Keep observed peaks as a dynamic reservation floor and restart the stability window
+  conservatively after daemon restart or missing process-memory samples.
+- Prevent backfill onto a GPU with an active exclusive queue job.
+
+### 中文
+
+- 非独占的长时 auto probe 在通过可配置的进程显存稳定窗口后，可以释放未使用的
+  启动时预留；默认仍保留 1GiB 波动空间。
+- 已观测峰值持续作为动态预留下界；daemon 重启或进程显存样本缺失后保守地重新
+  计算稳定窗口。
+- 禁止向仍有 active exclusive 队列任务的 GPU 回填新任务。
+
 ## [0.2.0] - 2026-07-21
 
 ### English

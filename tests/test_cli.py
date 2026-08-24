@@ -147,3 +147,7 @@ def test_init_writes_parseable_config_and_allows_zero_reserve(
     config.write_text(text, encoding="utf-8")
     settings = load_settings(config_path=config)
     assert settings.default_reserve_mb == 0
+    assert settings.auto_probe_hold_seconds == 300
+    assert settings.auto_probe_stable_samples == 12
+    assert settings.auto_probe_stability_tolerance_mb == 128
+    assert settings.auto_probe_release_margin_mb == 1024

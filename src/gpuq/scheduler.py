@@ -31,6 +31,13 @@ class GPUReservation:
     outstanding_memory_mb: int = 0
     reserve_mb: int = 0
     active_jobs: int = 0
+    exclusive_active: bool = False
+
+
+@dataclass
+class AutoProbeObservation:
+    first_seen: float
+    samples: list[int]
 
 
 def process_exists(pid: int) -> bool:
@@ -74,6 +81,7 @@ class Scheduler:
         backend: GPUBackend | None = None,
         launcher: Callable[[Job, int], None] | None = None,
         process_checker: Callable[[int], bool] | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.settings = settings
         ensure_state_dirs(settings)
@@ -81,8 +89,23 @@ class Scheduler:
         self.backend = backend or NvidiaSMIBackend(settings.nvidia_smi)
         self.launcher = launcher or self._launch
         self.process_checker = process_checker or process_exists
+        self.clock = clock or time.monotonic
         self.stability: dict[tuple[int, int], int] = {}
+        self.auto_probe_observations: dict[int, AutoProbeObservation] = {}
         self.runners: dict[int, subprocess.Popen[bytes]] = {}
+
+    def _auto_probe_can_share(self, job: Job) -> bool:
+        observation = self.auto_probe_observations.get(job.id)
+        if observation is None:
+            return False
+        if self.clock() - observation.first_seen < self.settings.auto_probe_hold_seconds:
+            return False
+        if len(observation.samples) < self.settings.auto_probe_stable_samples:
+            return False
+        return (
+            max(observation.samples) - min(observation.samples)
+            <= self.settings.auto_probe_stability_tolerance_mb
+        )
 
     def reconcile_active(self) -> list[int]:
         """Fail records whose runner and worker both disappeared.
@@ -124,25 +147,32 @@ class Scheduler:
                 else 0
             )
             target_memory = job.memory_mb
-            if (
-                job.is_uncalibrated_auto_probe
-                and job.launch_free_memory_mb is not None
-            ):
-                # Until the first probe succeeds or OOMs, its true peak is
-                # unknown.  Reserve the schedulable free region it saw at
-                # launch so gpuq does not start another job beside it and
-                # invalidate the measurement.
-                target_memory = max(
-                    target_memory,
-                    job.launch_free_memory_mb - job.reserve_mb,
-                )
+            probe_margin = job.reserve_mb
+            if job.is_uncalibrated_auto_probe and job.launch_free_memory_mb is not None:
+                probe_margin = max(probe_margin, self.settings.auto_probe_release_margin_mb)
+                if job.exclusive or not self._auto_probe_can_share(job):
+                    # Preserve the full launch-time region during warm-up. An
+                    # exclusive job never releases it while active.
+                    target_memory = max(
+                        target_memory,
+                        job.launch_free_memory_mb - probe_margin,
+                    )
+                else:
+                    # A stable probe keeps its observed peak plus the margin
+                    # carried below in reserve_mb.
+                    target_memory = max(
+                        target_memory,
+                        job.peak_memory_mb,
+                        observed,
+                    )
             reservations[job.assigned_gpu] = GPUReservation(
                 outstanding_memory_mb=(
                     current.outstanding_memory_mb
                     + max(0, target_memory - observed)
                 ),
-                reserve_mb=max(current.reserve_mb, job.reserve_mb),
+                reserve_mb=max(current.reserve_mb, probe_margin),
                 active_jobs=current.active_jobs + 1,
+                exclusive_active=current.exclusive_active or job.exclusive,
             )
         return reservations
 
@@ -165,6 +195,8 @@ class Scheduler:
         reservation: GPUReservation,
     ) -> bool:
         if job.gpu_allowlist is not None and state.index not in job.gpu_allowlist:
+            return False
+        if reservation.exclusive_active:
             return False
         fits, _, _ = self._fit(job, state, reservation)
         if not fits:
@@ -256,19 +288,49 @@ class Scheduler:
             runnable.append(job)
         return runnable
 
-    def refresh_peaks(self) -> None:
+    def refresh_peaks(self, states: list[GPUState]) -> None:
+        process_memory = {
+            (state.index, process.pid): process.used_memory_mb
+            for state in states
+            for process in state.processes
+        }
+        active_probe_ids: set[int] = set()
+        now = self.clock()
         for job in self.db.active():
             if job.worker_pid is None:
                 continue
-            observed = self.backend.process_memory_mb(job.worker_pid)
+            observed = (
+                process_memory.get((job.assigned_gpu, job.worker_pid))
+                if job.assigned_gpu is not None
+                else None
+            )
+            if observed is None:
+                observed = self.backend.process_memory_mb(job.worker_pid)
             if observed is not None and observed > job.peak_memory_mb:
                 self.db.update_peak(job.id, observed)
+            if not job.is_uncalibrated_auto_probe or job.exclusive:
+                continue
+            active_probe_ids.add(job.id)
+            if observed is None or observed <= 0:
+                self.auto_probe_observations.pop(job.id, None)
+                continue
+            observation = self.auto_probe_observations.get(job.id)
+            if observation is None:
+                observation = AutoProbeObservation(first_seen=now, samples=[])
+                self.auto_probe_observations[job.id] = observation
+            observation.samples.append(observed)
+            observation.samples = observation.samples[-self.settings.auto_probe_stable_samples :]
+        self.auto_probe_observations = {
+            job_id: observation
+            for job_id, observation in self.auto_probe_observations.items()
+            if job_id in active_probe_ids
+        }
 
     def tick(self, *, dry_run: bool = False) -> LaunchDecision | None:
         self.reap_runners()
         self.reconcile_active()
         states = self.backend.sample()
-        self.refresh_peaks()
+        self.refresh_peaks(states)
         jobs = self.db.runnable()
         jobs = self.fail_impossible_auto_jobs(jobs, states)
         decisions = self.decisions(jobs, states)

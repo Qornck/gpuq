@@ -187,6 +187,13 @@ probe run ── success ───────────────► comple
           └─ otherwise ─► retry_wait ─► wait for stable free VRAM ─► run again
 ```
 
+A long-running non-exclusive first probe does not need to hold its whole
+launch-time free region until exit. After five minutes of observed worker VRAM
+and 12 consecutive samples within a 128 MB band, gpuq shrinks that reservation
+to the observed peak while retaining at least 1024 MB of fluctuation margin. A
+later increase raises the peak floor immediately. Active `--exclusive` jobs
+never release their card to backfill jobs.
+
 After an OOM, the learned job-memory floor is the maximum of:
 
 ```text

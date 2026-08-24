@@ -181,6 +181,10 @@ def command_init(args: argparse.Namespace) -> int:
             "poll_seconds = 10\n"
             "default_reserve_mb = 1024\n"
             "default_stable_samples = 3\n"
+            "auto_probe_hold_seconds = 300\n"
+            "auto_probe_stable_samples = 12\n"
+            "auto_probe_stability_tolerance_mb = 128\n"
+            "auto_probe_release_margin_mb = 1024\n"
             "exclusive_max_used_mb = 768\n"
             "exclusive_max_utilization = 5\n"
             "# notify_command = [\"notify-send\", \"{title}\", \"{message}\"]\n",
@@ -404,6 +408,10 @@ def command_daemon(args: argparse.Namespace) -> int:
             poll_seconds=args.poll_seconds,
             default_reserve_mb=settings.default_reserve_mb,
             default_stable_samples=settings.default_stable_samples,
+            auto_probe_hold_seconds=settings.auto_probe_hold_seconds,
+            auto_probe_stable_samples=settings.auto_probe_stable_samples,
+            auto_probe_stability_tolerance_mb=(settings.auto_probe_stability_tolerance_mb),
+            auto_probe_release_margin_mb=settings.auto_probe_release_margin_mb,
             exclusive_max_used_mb=settings.exclusive_max_used_mb,
             exclusive_max_utilization=settings.exclusive_max_utilization,
             nvidia_smi=settings.nvidia_smi,

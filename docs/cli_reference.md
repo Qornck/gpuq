@@ -278,6 +278,10 @@ state_dir = "~/.local/state/gpuq"
 poll_seconds = 10
 default_reserve_mb = 1024
 default_stable_samples = 3
+auto_probe_hold_seconds = 300
+auto_probe_stable_samples = 12
+auto_probe_stability_tolerance_mb = 128
+auto_probe_release_margin_mb = 1024
 exclusive_max_used_mb = 768
 exclusive_max_utilization = 5
 nvidia_smi = "nvidia-smi"
@@ -290,6 +294,10 @@ notify_command = ["notify-send", "{title}", "{message}"]
 | `poll_seconds` | daemon 采样间隔 |
 | `default_reserve_mb` | submit 未指定 reserve 时采用 |
 | `default_stable_samples` | submit 未指定稳定次数时采用 |
+| `auto_probe_hold_seconds` | 首次 auto probe 共享前的最短观察秒数 |
+| `auto_probe_stable_samples` | 释放全区预留前的连续显存样本数 |
+| `auto_probe_stability_tolerance_mb` | 稳定窗口允许的最大显存波动 |
+| `auto_probe_release_margin_mb` | 释放后保留的最小显存波动空间 |
 | `exclusive_max_used_mb` | 独占模式允许的驱动/桌面基础显存 |
 | `exclusive_max_utilization` | 独占模式允许的最大瞬时利用率 |
 | `nvidia_smi` | `nvidia-smi` 可执行路径 |
