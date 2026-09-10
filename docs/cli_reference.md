@@ -162,13 +162,18 @@ gpuq show 21 --json
 ```bash
 gpuq logs 21
 gpuq logs -n 500 21
+gpuq logs 21 --tail 8
 gpuq logs -f 21
+gpuq log 21 --tail 0 -f
 ```
 
 | 参数 | 含义 |
 |---|---|
-| `-n N` / `--lines N` | 首次显示最后 N 行，默认 100 |
+| `-n N` / `--lines N` / `--tail N` | 首次显示最后 N 行，默认 100；N 必须非负，0 表示不显示已有日志 |
 | `-f` / `--follow` | 持续输出新增内容，任务进入终态后结束 |
+
+`log` 是 `logs` 的别名。使用 `--tail 0 -f` 可以只查看新增日志。
+读取已有日志时仅保留末尾 N 行，避免将整个日志文件载入内存。
 
 ## `gpuq cancel JOB_ID`
 

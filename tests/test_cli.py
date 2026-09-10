@@ -8,6 +8,7 @@ from gpuq.cli import (
     _parse_env,
     _parse_gpus,
     _read_pager_key,
+    _tail_lines,
     build_parser,
     main,
 )
@@ -15,6 +16,103 @@ from gpuq.config import load_settings
 from gpuq.db import QueueDB
 
 from conftest import submit_job
+
+
+@pytest.mark.parametrize("command", ["logs", "log"])
+@pytest.mark.parametrize("option", ["-n", "--lines", "--tail"])
+@pytest.mark.parametrize("count", [0, 8])
+def test_log_tail_argument_aliases(command: str, option: str, count: int) -> None:
+    args = build_parser().parse_args([command, "21", option, str(count), "-f"])
+    assert args.job_id == 21
+    assert args.lines == count
+    assert args.follow
+
+
+@pytest.mark.parametrize("count", ["-1", "1.5", "all"])
+def test_log_tail_rejects_invalid_count(count: str) -> None:
+    with pytest.raises(SystemExit) as error:
+        build_parser().parse_args(["logs", "21", "--tail", count])
+    assert error.value.code == 2
+
+
+def test_log_tail_defaults_to_100_lines() -> None:
+    assert build_parser().parse_args(["logs", "21"]).lines == 100
+
+
+@pytest.mark.parametrize(
+    "content,count,expected",
+    [
+        (b"one\ntwo\nthree\n", 2, "two\nthree"),
+        (b"one\ntwo\nthree", 2, "two\nthree"),
+        (b"one\r\ntwo\rthree\n", 2, "two\nthree"),
+        (b"one\n\n", 2, "one\n"),
+        ("第一行\n第二行\n".encode(), 1, "第二行"),
+        (b"one\n\xff\n", 1, "\ufffd"),
+        (b"one\n", 10, "one"),
+        (b"one\n", 0, ""),
+        (b"", 2, ""),
+    ],
+)
+def test_tail_lines_handles_boundaries(
+    tmp_path: Path, content: bytes, count: int, expected: str
+) -> None:
+    path = tmp_path / "job.log"
+    path.write_bytes(content)
+    assert _tail_lines(path, count) == expected
+
+
+def test_tail_lines_handles_missing_file_and_invalid_count(tmp_path: Path) -> None:
+    path = tmp_path / "missing.log"
+    assert _tail_lines(path, 8) == ""
+    with pytest.raises(ValueError, match="non-negative"):
+        _tail_lines(path, -1)
+
+
+def test_tail_lines_streams_instead_of_loading_entire_log(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "job.log"
+    with path.open("w") as handle:
+        for index in range(10_000):
+            handle.write(f"line {index}\n")
+
+    def reject_read_text(*args, **kwargs):
+        pytest.fail("tail must not load the complete log with read_text")
+
+    monkeypatch.setattr(Path, "read_text", reject_read_text)
+    assert _tail_lines(path, 2) == "line 9998\nline 9999"
+
+
+@pytest.mark.parametrize("count,expected", [(2, "two\nthree\n"), (0, "")])
+def test_log_tail_outputs_requested_lines(
+    db: QueueDB, settings, tmp_path: Path, monkeypatch, capsys, count: int, expected: str
+) -> None:
+    job = submit_job(db, tmp_path)
+    Path(job.log_path).write_text("one\ntwo\nthree\n", encoding="utf-8")
+    monkeypatch.setattr("gpuq.cli._db", lambda args: (settings, db))
+    with pytest.raises(SystemExit) as error:
+        main(["log", str(job.id), "--tail", str(count)])
+    assert error.value.code == 0
+    assert capsys.readouterr().out == expected
+
+
+def test_log_tail_zero_follow_only_prints_new_content(
+    db: QueueDB, settings, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    job = submit_job(db, tmp_path)
+    path = Path(job.log_path)
+    path.write_text("old content\n", encoding="utf-8")
+    monkeypatch.setattr("gpuq.cli._db", lambda args: (settings, db))
+
+    def append_then_interrupt(_seconds):
+        if "new content" in path.read_text(encoding="utf-8"):
+            raise KeyboardInterrupt
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write("new content\n")
+
+    monkeypatch.setattr("gpuq.cli.time.sleep", append_then_interrupt)
+    with pytest.raises(SystemExit) as error:
+        main(["logs", str(job.id), "--tail", "0", "-f"])
+    assert error.value.code == 130
+    assert capsys.readouterr().out == "new content\n"
 
 
 def test_resource_argument_aliases_and_command_remainder() -> None:

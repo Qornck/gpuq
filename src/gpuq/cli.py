@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 from datetime import datetime
 import json
 import math
@@ -68,6 +69,16 @@ def _positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError("value must be a positive integer") from error
     if result < 1:
         raise argparse.ArgumentTypeError("value must be a positive integer")
+    return result
+
+
+def _nonnegative_int(value: str) -> int:
+    try:
+        result = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("value must be a non-negative integer") from error
+    if result < 0:
+        raise argparse.ArgumentTypeError("value must be a non-negative integer")
     return result
 
 
@@ -319,10 +330,13 @@ def command_priority(args: argparse.Namespace) -> int:
 
 
 def _tail_lines(path: Path, lines: int) -> str:
-    if not path.exists():
+    if lines < 0:
+        raise ValueError("lines must be a non-negative integer")
+    if lines == 0 or not path.exists():
         return ""
-    content = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return "\n".join(content[-lines:])
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        content = deque(handle, maxlen=lines)
+    return "\n".join(line.rstrip("\r\n") for line in content)
 
 
 def command_logs(args: argparse.Namespace) -> int:
@@ -513,10 +527,13 @@ def build_parser() -> argparse.ArgumentParser:
     priority.add_argument("value", type=int)
     priority.set_defaults(function=command_priority)
 
-    logs = sub.add_parser("logs", help="查看或跟踪任务 stdout/stderr")
+    logs = sub.add_parser("logs", aliases=["log"], help="查看或跟踪任务 stdout/stderr")
     logs.add_argument("job_id", type=int)
     logs.add_argument("-f", "--follow", action="store_true")
-    logs.add_argument("-n", "--lines", type=int, default=100)
+    logs.add_argument(
+        "-n", "--lines", "--tail", dest="lines", type=_nonnegative_int, default=100,
+        metavar="N", help="首次显示最后 N 行；默认 100，0 表示不显示已有日志",
+    )
     logs.set_defaults(function=command_logs)
 
     gpus = sub.add_parser("gpus", help="显示调度器看到的 GPU 状态")
