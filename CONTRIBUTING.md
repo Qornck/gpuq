@@ -12,6 +12,10 @@ Thanks for improving gpuq. Small, focused pull requests are easiest to review.
    python -m pip install -e '.[dev]'
    ```
 
+   Use Ruff 0.16.6 from this extra. `pyproject.toml` pins both the required version
+   and the project's original rule set (`E4`, `E7`, `E9`, `F`) so local checks and
+   CI use the same policy; rule-set changes should be reviewed explicitly.
+
 4. Add or update tests. Tests must not require a physical GPU; use the fake backend.
 5. Run:
 
@@ -45,6 +49,9 @@ commands in issues and tests.
    ```bash
    python -m pip install -e '.[dev]'
    ```
+
+   请使用此依赖组中的 Ruff 0.16.6。`pyproject.toml` 同时锁定工具版本及项目原有的
+   `E4`、`E7`、`E9`、`F` 规则，确保本地与 CI 使用同一口径；扩展规则须明确评审。
 
 4. 新增或更新测试。测试不得依赖真实 GPU，应使用虚拟 backend。
 5. 运行：
