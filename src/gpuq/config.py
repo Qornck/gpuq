@@ -24,6 +24,7 @@ class Settings:
     auto_probe_release_margin_mb: int = 1024
     exclusive_max_used_mb: int = 768
     exclusive_max_utilization: int = 5
+    exclusive_shared_gpus: tuple[int, ...] = ()
     nvidia_smi: str = "nvidia-smi"
     notify_command: tuple[str, ...] | None = None
     config_path: Path | None = None
@@ -121,6 +122,10 @@ def load_settings(
         ),
         exclusive_max_used_mb=int(data.get("exclusive_max_used_mb", 768)),
         exclusive_max_utilization=int(data.get("exclusive_max_utilization", 5)),
+        exclusive_shared_gpus=tuple(
+            _nonnegative_int(index, "exclusive_shared_gpus")
+            for index in data.get("exclusive_shared_gpus", [])
+        ),
         nvidia_smi=str(data.get("nvidia_smi", "nvidia-smi")),
         notify_command=notify_command,
         config_path=path if path.exists() or config_path is not None else None,

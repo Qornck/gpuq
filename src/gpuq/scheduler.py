@@ -204,6 +204,11 @@ class Scheduler:
         if job.max_utilization is not None and state.utilization_percent > job.max_utilization:
             return False
         if job.exclusive:
+            # An explicit per-device policy may permit external programs.
+            # Memory/reserve and utilization gates above still apply, and
+            # exclusivity continues to prevent sharing among queue jobs.
+            if state.index in self.settings.exclusive_shared_gpus:
+                return reservation.active_jobs == 0
             return (
                 reservation.active_jobs == 0
                 and state.compute_process_count == 0
