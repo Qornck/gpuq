@@ -151,13 +151,18 @@ gpuq show 21 --json
 ```bash
 gpuq logs 21
 gpuq logs -n 500 21
+gpuq logs 21 --tail 8
 gpuq logs -f 21
+gpuq log 21 --tail 0 -f
 ```
 
 | Option | Meaning |
 |---|---|
-| `-n N` / `--lines N` | Initial tail length, default 100 |
+| `-n N` / `--lines N` / `--tail N` | Initial tail length, default 100; N must be non-negative, and 0 skips existing output |
 | `-f` / `--follow` | Follow until the job reaches a terminal state |
+
+`log` is an alias for `logs`. Use `--tail 0 -f` to display only newly appended output.
+Reading existing output retains only the last N lines instead of loading the entire log into memory.
 
 ## `gpuq cancel JOB_ID`
 
