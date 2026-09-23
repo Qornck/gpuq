@@ -1,5 +1,7 @@
 """Atomic, bounded recovery of interrupted jobs; never retries terminal errors."""
-from .db import QueueDB, localnow
+from datetime import datetime, timezone
+
+from .db import QueueDB
 
 
 def requeue_orphan(db: QueueDB, job_id: int, limit: int) -> bool:
@@ -18,7 +20,7 @@ def requeue_orphan(db: QueueDB, job_id: int, limit: int) -> bool:
         ).fetchone()[0]
         if count >= limit:
             return False
-        now = localnow()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         conn.execute("""UPDATE jobs SET status='queued', assigned_gpu=NULL,
             pid=NULL, pgid=NULL, worker_pid=NULL, exit_code=NULL, finished_at=NULL,
             started_at=NULL, error=NULL, failure_kind=NULL, updated_at=? WHERE id=?""",
