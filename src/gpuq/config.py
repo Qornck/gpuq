@@ -25,6 +25,7 @@ class Settings:
     exclusive_max_used_mb: int = 768
     exclusive_max_utilization: int = 5
     exclusive_shared_gpus: tuple[int, ...] = ()
+    max_orphan_retries: int = 0
     nvidia_smi: str = "nvidia-smi"
     notify_command: tuple[str, ...] | None = None
     config_path: Path | None = None
@@ -121,6 +122,9 @@ def load_settings(
             "auto_probe_release_margin_mb",
         ),
         exclusive_max_used_mb=int(data.get("exclusive_max_used_mb", 768)),
+        max_orphan_retries=_nonnegative_int(
+            data.get("max_orphan_retries", 0), "max_orphan_retries"
+        ),
         exclusive_max_utilization=int(data.get("exclusive_max_utilization", 5)),
         exclusive_shared_gpus=tuple(
             _nonnegative_int(index, "exclusive_shared_gpus")

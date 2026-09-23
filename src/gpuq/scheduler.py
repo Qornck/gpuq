@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 import fcntl
 import os
 import signal
@@ -13,6 +15,7 @@ from .config import Settings, ensure_state_dirs
 from .db import QueueDB
 from .gpu import GPUBackend, NvidiaSMIBackend
 from .models import GPUState, Job, JobStatus, TERMINAL_STATUSES
+from .recovery import requeue_orphan
 
 
 @dataclass(frozen=True)
@@ -93,6 +96,13 @@ class Scheduler:
         self.stability: dict[tuple[int, int], int] = {}
         self.auto_probe_observations: dict[int, AutoProbeObservation] = {}
         self.runners: dict[int, subprocess.Popen[bytes]] = {}
+        self.boot_time = None
+        try:
+            self.boot_time = next(float(line.split()[1]) for line in
+                                  Path('/proc/stat').read_text().splitlines()
+                                  if line.startswith('btime '))
+        except (OSError, StopIteration, ValueError):
+            pass
 
     def _auto_probe_can_share(self, job: Job) -> bool:
         observation = self.auto_probe_observations.get(job.id)
@@ -108,7 +118,7 @@ class Scheduler:
         )
 
     def reconcile_active(self) -> list[int]:
-        """Fail records whose runner and worker both disappeared.
+        """Recover (when enabled) or fail records whose processes disappeared.
 
         A live runner or worker is preserved across daemon restarts.  The
         conditional database update avoids racing a runner that writes its
@@ -116,11 +126,17 @@ class Scheduler:
         """
         recovered: list[int] = []
         for job in self.db.active():
+            before_boot = (self.boot_time is not None
+                           and datetime.fromisoformat(job.updated_at).timestamp() < self.boot_time)
             runner_alive = job.pid is not None and self.process_checker(job.pid)
             worker_alive = (
                 job.worker_pid is not None and self.process_checker(job.worker_pid)
             )
-            if runner_alive or worker_alive:
+            if not before_boot and (runner_alive or worker_alive):
+                continue
+            if requeue_orphan(self.db, job.id, self.settings.max_orphan_retries):
+                recovered.append(job.id)
+                print(f'gpuqd automatically requeued interrupted job={job.id}', flush=True)
                 continue
             if self.db.fail_if_active(
                 job.id,
