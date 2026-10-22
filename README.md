@@ -114,6 +114,7 @@ README languages.
 git clone https://github.com/lzy248/gpuq.git
 cd gpuq
 python -m pip install --user -e .
+export PATH="$(python -m site --user-base)/bin:$PATH"
 gpuq init
 gpuq doctor
 ```
